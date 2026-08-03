@@ -7,6 +7,8 @@ from datetime import datetime
 import click
 from zoneinfo import ZoneInfo
 
+from .transport import KLAVIYO_BASE
+
 TZ_MAP = {
     "EST": "America/New_York",
     "EDT": "America/New_York",
@@ -118,8 +120,6 @@ _OP_SYMBOL = {"greater-than": ">", "greater-than-or-equal": ">=",
 
 def _resolve_metrics(call) -> dict:
     """Return {metric_id: {"name": str, "integration": str}} for all metrics."""
-    from .transport import KLAVIYO_BASE
-
     out: dict = {}
     path = "/api/metrics/"
     while path:
