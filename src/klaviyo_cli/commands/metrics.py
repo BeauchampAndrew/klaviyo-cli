@@ -256,3 +256,85 @@ def form_performance(ctx, days):
             print(f"  {'Total':<10} {total_v:>10,} {total_s:>10,} {total_rate:>7.2f}% {total_sub:>10,}")
     except (AuthError, APIError) as e:
         raise click.ClickException(str(e))
+
+
+# ---------------------------------------------------------------------------
+# metric-aggregate
+# ---------------------------------------------------------------------------
+
+
+@main.command("metric-aggregate")
+@click.argument("metric_id")
+@click.option("--measurements", default="count,unique", show_default=True,
+              help="Comma list of: count, unique, sum_value")
+@click.option("--interval", type=click.Choice(["hour", "day", "week", "month"]),
+              default="week", show_default=True)
+@click.option("--days", default=90, show_default=True, help="Days to look back")
+@click.option("--since", help="Start date YYYY-MM-DD (overrides --days)")
+@click.option("--until", help="End date YYYY-MM-DD (defaults to today)")
+@click.option("--by", "by_fields", multiple=True,
+              help="Group by an event dimension (repeatable; the API rejects "
+                   "unsupported fields and names the valid ones)")
+@click.option("--timezone", "tz", default="UTC", show_default=True,
+              help="Bucket timezone, e.g. America/Chicago")
+@click.pass_context
+def metric_aggregate(ctx, metric_id, measurements, interval, days, since, until,
+                     by_fields, tz):
+    """Bucketed counts for one metric over time (POST /api/metric-aggregates/).
+
+    The workhorse for trend questions: weekly Added to Cart uniques, daily
+    Placed Order counts, etc. Metric IDs come from list-metrics.
+    """
+    use_json = ctx.obj["json"]
+    try:
+        from .._util import _resolve_date_range
+
+        start, end, label = _resolve_date_range(days, since, until)
+        meas = [m.strip() for m in measurements.split(",") if m.strip()]
+        attributes = {
+            "metric_id": metric_id,
+            "measurements": meas,
+            "interval": interval,
+            "filter": [
+                f"greater-or-equal(datetime,{start.strftime('%Y-%m-%dT%H:%M:%S')})",
+                f"less-than(datetime,{end.strftime('%Y-%m-%dT%H:%M:%S')})",
+            ],
+            "timezone": tz,
+        }
+        if by_fields:
+            attributes["by"] = list(by_fields)
+        body = {"data": {"type": "metric-aggregate", "attributes": attributes}}
+        data = ctx.obj["call"]("POST", "/api/metric-aggregates/", body=body)
+
+        if use_json:
+            output(data, use_json=True)
+            return
+
+        attrs = data.get("data", {}).get("attributes", {})
+        dates = [d[:10] for d in attrs.get("dates", [])]
+        widths = {m: max(len(m), 10) for m in meas}
+        print(f"Metric {metric_id} by {interval} ({label}, tz {tz}):")
+        for series in attrs.get("data", []):
+            dims = series.get("dimensions") or []
+            if dims:
+                print(f"\n  {' / '.join(str(d) for d in dims)}")
+            print("  " + "date".ljust(12)
+                  + " ".join(m.rjust(widths[m]) for m in meas))
+            counts = series.get("measurements", {})
+            totals = dict.fromkeys(meas, 0.0)
+            for i, d in enumerate(dates):
+                row = []
+                for m in meas:
+                    vals = counts.get(m, [])
+                    v = vals[i] if i < len(vals) else 0
+                    v = v or 0
+                    totals[m] += v
+                    row.append((f"{v:,.2f}" if m == "sum_value" else f"{int(v):,}")
+                               .rjust(widths[m]))
+                print("  " + d.ljust(12) + " ".join(row))
+            print("  " + "TOTAL".ljust(12)
+                  + " ".join((f"{totals[m]:,.2f}" if m == "sum_value"
+                              else f"{int(totals[m]):,}").rjust(widths[m])
+                             for m in meas))
+    except (AuthError, APIError) as e:
+        raise click.ClickException(str(e))

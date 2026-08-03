@@ -187,3 +187,17 @@ def _render_definition(definition: dict, metric_map: dict, oneline: bool = False
 
 def _norm_name(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip().lower())
+
+
+def _find_placed_order_metric(call) -> str | None:
+    """Return the Placed Order metric ID (Shopify preferred), or None."""
+    data = call("GET", "/api/metrics/")
+    fallback = None
+    for m in data.get("data", []):
+        attrs = m.get("attributes", {})
+        if attrs.get("name", "").lower() == "placed order":
+            integration = (attrs.get("integration") or {}).get("name", "")
+            if integration == "Shopify":
+                return m["id"]
+            fallback = fallback or m["id"]
+    return fallback

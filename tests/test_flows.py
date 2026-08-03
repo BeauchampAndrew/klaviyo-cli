@@ -283,3 +283,136 @@ def test_flow_performance_total_row_formats(mock_build):
     assert result.exit_code == 0, result.output
     assert "TOTAL" in result.output
     assert ":::" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# flow-series
+# ---------------------------------------------------------------------------
+
+_PLACED_ORDER_METRICS = {"data": [{"id": "M1", "attributes": {
+    "name": "Placed Order", "integration": {"name": "Shopify"}}}]}
+
+_SERIES_REPORT = {"data": {"attributes": {
+    "date_times": ["2026-07-06T00:00:00+00:00", "2026-07-13T00:00:00+00:00"],
+    "results": [
+        {"groupings": {"flow_id": "F1", "flow_message_id": "MA"},
+         "statistics": {"recipients": [10, 0], "conversion_value": [100.0, 0]}},
+        {"groupings": {"flow_id": "F1", "flow_message_id": "MB"},
+         "statistics": {"recipients": [5, 2], "conversion_value": [0, 50.0]}},
+    ],
+}}}
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_flow_series_aggregates_messages_by_flow(mock_build):
+    """Messages sum per flow per bucket; filter uses contains-any (any() is rejected)."""
+    name_resp = {"data": {"id": "F1", "attributes": {"name": "Checkout Started"}}}
+    ctx_obj, calls = _fake_ctx_factory([_PLACED_ORDER_METRICS, _SERIES_REPORT, name_resp])
+    mock_build.return_value = ctx_obj
+
+    result = CliRunner().invoke(main, [
+        "flow-series", "F1", "--statistics", "recipients,conversion_value",
+    ])
+
+    assert result.exit_code == 0, result.output
+    body = calls[1][2]
+    attrs = body["data"]["attributes"]
+    assert attrs["filter"] == 'contains-any(flow_id,["F1"])'
+    assert attrs["conversion_metric_id"] == "M1"
+    assert attrs["interval"] == "weekly"
+    assert "Checkout Started" in result.output
+    # 10+5 recipients in week 1, 0+2 in week 2, totals row sums both.
+    assert "15" in result.output
+    assert "150.00" in result.output
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_flow_series_per_message_keeps_messages_separate(mock_build):
+    name_resp = {"data": {"id": "F1", "attributes": {"name": "Checkout Started"}}}
+    ctx_obj, calls = _fake_ctx_factory([_PLACED_ORDER_METRICS, _SERIES_REPORT, name_resp])
+    mock_build.return_value = ctx_obj
+
+    result = CliRunner().invoke(main, [
+        "flow-series", "F1", "--per-message",
+        "--statistics", "recipients",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert "message MA" in result.output
+    assert "message MB" in result.output
+
+
+# ---------------------------------------------------------------------------
+# flow-actions
+# ---------------------------------------------------------------------------
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_flow_actions_sorted_newest_updated_first(mock_build):
+    page = {"data": [
+        {"id": "98885293", "attributes": {
+            "action_type": "SEND_EMAIL", "status": "live",
+            "created": "2026-02-03T00:00:00+00:00",
+            "updated": "2026-05-12T01:08:36+00:00"}},
+        {"id": "106293419", "attributes": {
+            "action_type": "SEND_SMS", "status": "draft",
+            "created": "2026-05-12T00:00:00+00:00",
+            "updated": "2026-07-23T16:55:06+00:00"}},
+    ], "links": {"next": None}}
+    ctx_obj, calls = _fake_ctx_factory([page])
+    mock_build.return_value = ctx_obj
+
+    result = CliRunner().invoke(main, ["flow-actions", "FLOW1"])
+
+    assert result.exit_code == 0, result.output
+    assert "fields[flow-action]=action_type,status,created,updated" in calls[0][1]
+    # The 7/23 toggle must render above the older update.
+    assert result.output.index("2026-07-23") < result.output.index("2026-05-12")
+    assert "SEND_SMS" in result.output
+    assert "draft" in result.output
+
+
+# ---------------------------------------------------------------------------
+# get-flow --definition branch tree
+# ---------------------------------------------------------------------------
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_get_flow_definition_renders_branch_tree(mock_build):
+    """Trigger-splits render YES/NO branches with condition and message names."""
+    resp = {"data": {"id": "FLOW1", "attributes": {
+        "name": "Checkout Started", "status": "live", "trigger_type": "Metric",
+        "created": "2025-01-01T00:00:00+00:00", "updated": "2026-05-01T00:00:00+00:00",
+        "definition": {
+            "triggers": [{"type": "metric", "id": "MET1"}],
+            "entry_action_id": "A1",
+            "actions": [
+                {"id": "A1", "type": "trigger-split",
+                 "data": {"trigger_filter": {"condition_groups": [{"conditions": [
+                     {"type": "metric-property", "metric_id": "MET1",
+                      "field": "Collections",
+                      "filter": {"type": "list", "operator": "contains",
+                                 "value": "Yoder Smokers"}}]}]}},
+                 "links": {"next_if_true": "A2", "next_if_false": "A3"}},
+                {"id": "A2", "type": "send-email",
+                 "data": {"message": {"id": "MSG1", "name": "Yoder Email 1",
+                                      "subject_line": "You forgot something"}},
+                 "links": {"next": None}},
+                {"id": "A3", "type": "send-email",
+                 "data": {"message": {"id": "MSG2", "name": "Catch All 1"}},
+                 "links": {"next": None}},
+            ],
+        },
+    }}}
+    ctx_obj, calls = _fake_ctx_factory([resp])
+    mock_build.return_value = ctx_obj
+
+    result = CliRunner().invoke(main, ["get-flow", "FLOW1", "--definition"])
+
+    assert result.exit_code == 0, result.output
+    assert "YES:" in result.output and "NO:" in result.output
+    assert "Collections contains 'Yoder Smokers'" in result.output
+    assert "Yoder Email 1" in result.output
+    assert "You forgot something" in result.output
+    # The YES branch renders before the NO branch.
+    assert result.output.index("Yoder Email 1") < result.output.index("Catch All 1")

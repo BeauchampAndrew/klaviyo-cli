@@ -76,9 +76,11 @@ Run `klaviyo COMMAND --help` for full options on any command.
 | Command | Description |
 |---|---|
 | `flows` | List all flows for a client, with optional sort and name search |
-| `get-flow` | Show a flow's basics in one call; `--definition` adds trigger, action chain, reentry |
+| `get-flow` | Show a flow's basics in one call; `--definition` renders the branch tree (splits, messages, delays) |
 | `flow-detail` | Show full flow structure: trigger, filters, emails with subjects, delays, splits |
 | `flow-performance` | Show flow revenue and engagement metrics |
+| `flow-series` | Flow performance over time (daily/weekly/monthly buckets, per flow or per message) |
+| `flow-actions` | List a flow's actions with status and created/updated timestamps (audit view) |
 | `create-flow` | Create a flow (in draft) from a definition, guarding against duplicates |
 
 ### Profiles
@@ -94,13 +96,14 @@ Run `klaviyo COMMAND --help` for full options on any command.
 | Command | Description |
 |---|---|
 | `push-event` | Push a custom event to a profile by email (creates the profile if needed) |
-| `events` | List recent events for a metric ID, newest first, with the profile attached |
+| `events` | List recent events for a metric ID; `--since/--until` windows, `--properties` payloads |
 
 ### Metrics
 | Command | Description |
 |---|---|
 | `account-health` | Show profiles count, lists, and metrics for a client |
 | `list-metrics` | List event metrics with their IDs and integration (ID<->name catalog) |
+| `metric-aggregate` | Bucketed counts for one metric over time (hour/day/week/month, optional group-by) |
 | `form-performance` | Show pop-up/form views, submits, and submit rates |
 
 ### SMS

@@ -131,3 +131,52 @@ def test_events_combines_profile_filter_with_and(mock_build):
     assert ("filter=and%28equals%28metric_id%2C%22MET1%22%29%2C"
             "equals%28profile_id%2C%22P1%22%29%29") in path
     assert "page[size]=10" in path
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_events_window_filter_and_properties(mock_build):
+    """--since/--until join into and(...) with unquoted datetimes; --properties prints payloads."""
+    page = {"data": [{
+        "id": "E1",
+        "attributes": {"datetime": "2026-07-08T10:00:00+00:00",
+                       "event_properties": {"Collections": ["Yoder Smokers"]}},
+        "relationships": {"profile": {"data": {"id": "P1"}}},
+    }], "included": [{"type": "profile", "id": "P1",
+                      "attributes": {"email": "ann@example.com"}}],
+        "links": {"next": None}}
+    ctx_obj, calls = _fake_ctx_factory([page])
+    mock_build.return_value = ctx_obj
+
+    result = CliRunner().invoke(main, [
+        "events", "--metric", "RGkS29",
+        "--since", "2026-07-06", "--until", "2026-07-13",
+        "--properties", "--limit", "5",
+    ])
+
+    assert result.exit_code == 0, result.output
+    from urllib.parse import unquote
+    path = unquote(calls[0][1])
+    assert ('and(equals(metric_id,"RGkS29"),'
+            "greater-or-equal(datetime,2026-07-06),"
+            "less-than(datetime,2026-07-13))") in path
+    assert "ann@example.com" in result.output
+    assert "Yoder Smokers" in result.output
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_events_paginates_up_to_limit(mock_build):
+    def ev(i):
+        return {"id": f"E{i}",
+                "attributes": {"datetime": f"2026-07-0{i}T00:00:00+00:00"},
+                "relationships": {"profile": {"data": {"id": f"P{i}"}}}}
+    page1 = {"data": [ev(1), ev(2)], "included": [],
+             "links": {"next": "https://a.klaviyo.com/api/events/?page%5Bcursor%5D=NEXT"}}
+    page2 = {"data": [ev(3)], "included": [], "links": {"next": None}}
+    ctx_obj, calls = _fake_ctx_factory([page1, page2])
+    mock_build.return_value = ctx_obj
+
+    result = CliRunner().invoke(main, ["events", "--metric", "M1", "--limit", "3"])
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 2
+    assert "E3" not in result.output or "3 shown" in result.output

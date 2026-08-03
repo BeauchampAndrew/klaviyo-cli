@@ -5,7 +5,7 @@ from datetime import datetime
 
 import click
 
-from .._util import _norm_name, output
+from .._util import _find_placed_order_metric, _norm_name, _resolve_date_range, output
 from ..cli import main
 from ..transport import APIError, AuthError, KLAVIYO_BASE
 
@@ -82,20 +82,8 @@ def flow_performance(ctx, days):
         end = datetime.now(timezone.utc)
         start = end - timedelta(days=days)
 
-        # Find Placed Order metric (try Shopify first, then Magento)
-        metrics_resp = ctx.obj["call"]("GET", "/api/metrics/")
-        conversion_id = None
-        for m in metrics_resp.get("data", []):
-            name = m.get("attributes", {}).get("name", "").lower()
-            integration = (m.get("attributes", {}).get("integration") or {}).get("name", "")
-            if name == "placed order" and integration == "Shopify":
-                conversion_id = m["id"]
-                break
-        if not conversion_id:
-            for m in metrics_resp.get("data", []):
-                if m.get("attributes", {}).get("name", "").lower() == "placed order":
-                    conversion_id = m["id"]
-                    break
+        # Find Placed Order metric (Shopify preferred)
+        conversion_id = _find_placed_order_metric(ctx.obj["call"])
 
         # Get flow names (paginate; no status filter so manual/draft flows in
         # the report still resolve to a name instead of a raw ID)
@@ -345,6 +333,92 @@ def flow_detail(ctx, flow_id):
 # ---------------------------------------------------------------------------
 
 
+def _split_summary(action: dict) -> str:
+    """Compact one-line summary of a split's conditions."""
+    data = action.get("data") or {}
+    tf = data.get("trigger_filter") or data.get("profile_filter") or {}
+    groups = tf.get("condition_groups") or []
+    if not groups:
+        return json_module.dumps(data)[:120]
+
+    def cond(c):
+        f = c.get("filter") or {}
+        ctype = c.get("type")
+        if ctype == "metric-property":
+            return f"{c.get('field')} {f.get('operator')} {f.get('value')!r}"
+        if ctype == "profile-metric":
+            mf = c.get("measurement_filter") or {}
+            return (f"metric {c.get('metric_id')} {c.get('measurement')} "
+                    f"{mf.get('operator')} {mf.get('value')}")
+        if ctype == "profile-marketing-consent":
+            return f"{(c.get('consent') or {}).get('channel', '?')} consent"
+        return json_module.dumps(c)[:80]
+
+    rendered = [" OR ".join(cond(c) for c in g.get("conditions", [])) for g in groups]
+    return " AND ".join(f"({r})" if " OR " in r else r for r in rendered)
+
+
+def _describe_action(action: dict) -> str:
+    """One-line description of a definition action node."""
+    atype = action.get("type", "?")
+    data = action.get("data") or {}
+    if atype == "send-email":
+        msg = data.get("message") or {}
+        line = f"send-email [{msg.get('id', '?')}] {msg.get('name', '?')}"
+        subject = msg.get("subject_line")
+        if subject:
+            line += f' — subject: "{subject}"'
+        return line
+    if atype == "send-sms":
+        msg = data.get("message") or {}
+        body = (msg.get("body") or "").replace("\n", " ").strip()
+        line = f"send-sms [{msg.get('id', '?')}]"
+        if body:
+            line += f' "{body[:60]}"'
+        return line
+    if atype == "send-webhook":
+        url = data.get("url") or data.get("webhook_url")
+        return f"send-webhook -> {url}" if url else "send-webhook"
+    if atype == "time-delay":
+        unit = str(data.get("unit", "?")).rstrip("s")
+        return f"time-delay {data.get('value', '?')} {unit}(s)"
+    if atype in ("trigger-split", "conditional-split", "boolean-branch"):
+        return f"{atype}: {_split_summary(action)}"
+    return atype
+
+
+def _print_action_tree(definition: dict):
+    """Walk the definition from entry_action_id, rendering branches indented."""
+    actions = definition.get("actions", [])
+    by_id = {a.get("id") or a.get("temporary_id"): a for a in actions}
+    seen: set = set()
+
+    def walk(aid, depth):
+        if aid is None or aid not in by_id or aid in seen:
+            return
+        seen.add(aid)
+        action = by_id[aid]
+        print("  " * depth + "  " + _describe_action(action))
+        links = action.get("links") or {}
+        if "next_if_true" in links or "next_if_false" in links:
+            print("  " * (depth + 1) + "  YES:")
+            walk(links.get("next_if_true"), depth + 2)
+            print("  " * (depth + 1) + "  NO:")
+            walk(links.get("next_if_false"), depth + 2)
+        else:
+            nxt = links.get("next")
+            for n in [nxt] if isinstance(nxt, str) else (nxt or []):
+                walk(n, depth)
+
+    print(f"\nActions ({len(actions)} steps):")
+    walk(definition.get("entry_action_id"), 0)
+    orphans = [aid for aid in by_id if aid not in seen]
+    if orphans:
+        print(f"\nUnreachable actions ({len(orphans)}):")
+        for aid in orphans:
+            print(f"  {_describe_action(by_id[aid])}")
+
+
 @main.command("get-flow")
 @click.argument("flow_id")
 @click.option("--definition", "show_definition", is_flag=True,
@@ -378,19 +452,12 @@ def get_flow(ctx, flow_id, show_definition):
             definition = attrs.get("definition") or {}
             for t in definition.get("triggers", []):
                 print(f"  Trigger: {t.get('type', '?')} (id: {t.get('id', '?')})")
+                tfilter = t.get("trigger_filter")
+                if tfilter:
+                    print(f"  Trigger filter: {json_module.dumps(tfilter)[:200]}")
 
-            actions = definition.get("actions", [])
-            if actions:
-                print(f"\nActions ({len(actions)} steps):")
-                for i, a in enumerate(actions, 1):
-                    atype = a.get("type", "?")
-                    line = f"  {i}. {atype}"
-                    if atype == "send-webhook":
-                        a_data = a.get("data") or {}
-                        url = a_data.get("url") or a_data.get("webhook_url")
-                        if url:
-                            line += f" -> {url}"
-                    print(line)
+            if definition.get("actions"):
+                _print_action_tree(definition)
 
             reentry = definition.get("reentry_criteria") or {}
             if reentry:
@@ -495,5 +562,166 @@ def create_flow(ctx, body_arg, name, fix_ids, force):
             print(f"Created flow [{new.get('id', '?')}] "
                   f"{new.get('attributes', {}).get('name', flow_name)}")
             print("Flow created in draft. Review in Klaviyo UI before setting live.")
+    except (AuthError, APIError) as e:
+        raise click.ClickException(str(e))
+
+
+# ---------------------------------------------------------------------------
+# flow-series
+# ---------------------------------------------------------------------------
+
+
+_DEFAULT_FLOW_STATS = "recipients,delivered,clicks_unique,conversions,conversion_value"
+
+
+@main.command("flow-series")
+@click.argument("flow_ids", nargs=-1, required=True)
+@click.option("--interval", type=click.Choice(["daily", "weekly", "monthly"]),
+              default="weekly", show_default=True)
+@click.option("--days", default=90, show_default=True, help="Days to look back")
+@click.option("--since", help="Start date YYYY-MM-DD (overrides --days)")
+@click.option("--until", help="End date YYYY-MM-DD (defaults to today)")
+@click.option("--statistics", default=_DEFAULT_FLOW_STATS, show_default=True,
+              help="Comma-separated flow statistics")
+@click.option("--per-message", is_flag=True,
+              help="Break out each flow message instead of summing by flow "
+                   "(message names via flow-detail)")
+@click.option("--conversion-metric", "conversion_metric", default=None,
+              help="Conversion metric ID (default: auto-detect Placed Order)")
+@click.pass_context
+def flow_series(ctx, flow_ids, interval, days, since, until, statistics,
+                per_message, conversion_metric):
+    """Show a flow's performance over time (POST /api/flow-series-reports/).
+
+    One table per flow: date buckets x statistics, summed across the flow's
+    messages unless --per-message. Spots trends and outages a totals view
+    hides — e.g. a branch whose recipients drop to zero for two weeks.
+    """
+    use_json = ctx.obj["json"]
+    try:
+        start, end, label = _resolve_date_range(days, since, until)
+        stats = [s.strip() for s in statistics.split(",") if s.strip()]
+
+        if not conversion_metric:
+            conversion_metric = _find_placed_order_metric(ctx.obj["call"])
+            if not conversion_metric:
+                raise click.ClickException(
+                    "No Placed Order metric found — pass --conversion-metric.")
+
+        ids = ",".join(f'"{fid}"' for fid in flow_ids)
+        body = {
+            "data": {
+                "type": "flow-series-report",
+                "attributes": {
+                    "statistics": stats,
+                    "timeframe": {
+                        "start": start.strftime("%Y-%m-%dT%H:%M:%S"),
+                        "end": end.strftime("%Y-%m-%dT%H:%M:%S"),
+                    },
+                    "interval": interval,
+                    "conversion_metric_id": conversion_metric,
+                    # NB: the API rejects any(flow_id,...) — contains-any only.
+                    "filter": f"contains-any(flow_id,[{ids}])",
+                },
+            }
+        }
+        data = ctx.obj["call"]("POST", "/api/flow-series-reports/", body=body)
+        if use_json:
+            output(data, use_json=True)
+            return
+
+        attrs = data.get("data", {}).get("attributes", {})
+        dates = [d[:10] for d in attrs.get("date_times", [])]
+        results = attrs.get("results", [])
+
+        # Resolve flow names (one cheap GET per requested flow).
+        flow_names = {}
+        for fid in flow_ids:
+            try:
+                resp = ctx.obj["call"]("GET", f"/api/flows/{fid}/?fields[flow]=name")
+                flow_names[fid] = resp.get("data", {}).get("attributes", {}).get("name", fid)
+            except (AuthError, APIError):
+                flow_names[fid] = fid
+
+        # group key: flow, or (flow, message)
+        grouped: dict = {}
+        for r in results:
+            g = r.get("groupings", {})
+            key = (g.get("flow_id"),
+                   g.get("flow_message_id") if per_message else None)
+            bucket = grouped.setdefault(key, {s: [0.0] * len(dates) for s in stats})
+            for s in stats:
+                for i, v in enumerate(r.get("statistics", {}).get(s, [])):
+                    if i < len(dates):
+                        bucket[s][i] += v or 0
+
+        widths = {s: max(len(s), 10) for s in stats}
+        print(f"Flow series for {ctx.obj['label']} ({label}, {interval}):")
+        for (fid, mid), series in grouped.items():
+            title = f"\n{flow_names.get(fid, fid)} [{fid}]"
+            if mid:
+                title += f" — message {mid}"
+            print(title)
+            print("  " + "date".ljust(12)
+                  + " ".join(s.rjust(widths[s]) for s in stats))
+            for i, d in enumerate(dates):
+                row = []
+                for s in stats:
+                    v = series[s][i]
+                    if "value" in s or "rate" in s or "per" in s:
+                        row.append(f"{v:,.2f}".rjust(widths[s]))
+                    else:
+                        row.append(f"{int(v):,}".rjust(widths[s]))
+                print("  " + d.ljust(12) + " ".join(row))
+            totals = []
+            for s in stats:
+                v = sum(series[s])
+                totals.append((f"{v:,.2f}" if "value" in s or "rate" in s or "per" in s
+                               else f"{int(v):,}").rjust(widths[s]))
+            print("  " + "TOTAL".ljust(12) + " ".join(totals))
+    except (AuthError, APIError) as e:
+        raise click.ClickException(str(e))
+
+
+# ---------------------------------------------------------------------------
+# flow-actions
+# ---------------------------------------------------------------------------
+
+
+@main.command("flow-actions")
+@click.argument("flow_id")
+@click.pass_context
+def flow_actions(ctx, flow_id):
+    """List a flow's actions with status and created/updated timestamps.
+
+    The audit view: a flow's own `updated` field only moves on structural
+    edits, but toggling an email live/draft stamps that action's `updated`.
+    Sorted newest-updated first, so recent toggles surface at the top.
+    """
+    use_json = ctx.obj["json"]
+    try:
+        actions: list = []
+        path = (f"/api/flows/{flow_id}/flow-actions/"
+                "?fields[flow-action]=action_type,status,created,updated&page[size]=50")
+        while path:
+            data = ctx.obj["call"]("GET", path)
+            actions.extend(data.get("data", []))
+            next_link = data.get("links", {}).get("next")
+            path = next_link.replace(KLAVIYO_BASE, "") if next_link else None
+
+        if use_json:
+            output({"data": actions}, use_json=True)
+            return
+
+        actions.sort(key=lambda a: a.get("attributes", {}).get("updated") or "",
+                     reverse=True)
+        print(f"Flow actions for {flow_id} ({len(actions)} total, newest update first):")
+        for a in actions:
+            attrs = a.get("attributes", {})
+            updated = attrs.get("updated") or "?"
+            created = (attrs.get("created") or "?").split("T")[0]
+            print(f"  {updated}  {attrs.get('status', '?'):<7} "
+                  f"{attrs.get('action_type', '?'):<18} id={a.get('id')} "
+                  f"(created {created})")
     except (AuthError, APIError) as e:
         raise click.ClickException(str(e))
