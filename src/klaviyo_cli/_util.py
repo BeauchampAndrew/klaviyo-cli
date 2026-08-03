@@ -1,6 +1,7 @@
 """Shared helpers for command modules: timezone parsing, date ranges, output."""
 
 import json as json_module
+import re
 from datetime import datetime
 
 import click
@@ -99,3 +100,87 @@ def output(data, use_json: bool = False):
         else:
             # Fallback for unformatted data — callers should format before calling
             print(json_module.dumps(data, indent=2, default=str))
+
+
+# ---------------------------------------------------------------------------
+# Segment definition helpers
+# ---------------------------------------------------------------------------
+#
+# Klaviyo segment conditions reference metrics by opaque ID (e.g. "profile-metric"
+# conditions carry a metric_id like "XJcga2" rather than a name like "Opened
+# Email"). Reading or building any metric-based segment requires the ID->name
+# map, so these helpers back both list-metrics and the segment commands.
+
+_WINDOW_UNIT = {"day": "d", "week": "w", "month": "mo", "hour": "h", "year": "y"}
+_OP_SYMBOL = {"greater-than": ">", "greater-than-or-equal": ">=",
+              "less-than": "<", "less-than-or-equal": "<=", "equals": "="}
+
+
+def _resolve_metrics(call) -> dict:
+    """Return {metric_id: {"name": str, "integration": str}} for all metrics."""
+    from .transport import KLAVIYO_BASE
+
+    out: dict = {}
+    path = "/api/metrics/"
+    while path:
+        data = call("GET", path)
+        for m in data.get("data", []):
+            attrs = m.get("attributes", {})
+            out[m["id"]] = {
+                "name": attrs.get("name", "?"),
+                "integration": (attrs.get("integration") or {}).get("name", ""),
+            }
+        next_link = data.get("links", {}).get("next")
+        path = next_link.replace(KLAVIYO_BASE, "") if next_link else None
+    return out
+
+
+def _format_condition(cond: dict, metric_map: dict) -> str:
+    """Render a single segment condition to a human-readable string."""
+    t = cond.get("type")
+    if t == "profile-marketing-consent":
+        ch = (cond.get("consent") or {}).get("channel", "?")
+        return f"can receive {ch} marketing"
+    if t == "profile-property":
+        prop = cond.get("property", "?")
+        m = re.match(r"properties\['(.+)'\]", prop)
+        prop = m.group(1) if m else prop
+        f = cond.get("filter") or {}
+        ft = f.get("type")
+        if ft == "existence":
+            return f"{prop} is {f.get('operator', '?')}"
+        if ft == "boolean":
+            return f"{prop} = {f.get('value')}"
+        val = f.get("value")
+        return f"{prop} {f.get('operator', '?')}{'' if val is None else ' ' + str(val)}"
+    if t == "profile-metric":
+        mid = cond.get("metric_id")
+        name = metric_map.get(mid, {}).get("name", mid)
+        mf = cond.get("measurement_filter") or {}
+        op = _OP_SYMBOL.get(mf.get("operator"), mf.get("operator", "?"))
+        val = mf.get("value")
+        tf = cond.get("timeframe_filter") or {}
+        window = ""
+        if tf.get("operator") == "in-the-last":
+            unit = _WINDOW_UNIT.get(tf.get("unit"), tf.get("unit", ""))
+            window = f" in last {tf.get('quantity')}{unit}"
+        return f"{name} {op}{val}{window}"
+    return t or "?"
+
+
+def _render_definition(definition: dict, metric_map: dict, oneline: bool = False):
+    """Render condition_groups. Groups are AND'd; conditions within OR'd.
+
+    Returns a list of per-group strings, or a single AND-joined string when
+    oneline=True.
+    """
+    groups = (definition or {}).get("condition_groups", [])
+    rendered = [" OR ".join(_format_condition(c, metric_map) for c in g.get("conditions", []))
+                for g in groups]
+    if oneline:
+        return " AND ".join(f"({g})" if " OR " in g else g for g in rendered)
+    return rendered
+
+
+def _norm_name(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip().lower())
