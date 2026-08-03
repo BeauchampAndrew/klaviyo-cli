@@ -55,7 +55,11 @@ def wrap_with_account(
     account_param = click.Argument([arg_name])
 
     def callback(*args, **kwargs):
-        account = kwargs.pop(arg_name)
+        # click normalizes the param decl into a Python-identifier dest name
+        # (dashes -> underscores) when building kwargs, so we must pop by
+        # account_param.name, not the raw arg_name -- otherwise any
+        # dashed arg_name (e.g. "client-id") KeyErrors on every invocation.
+        account = kwargs.pop(account_param.name)
         ctx = click.get_current_context()
         transport = None
 
