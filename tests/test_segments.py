@@ -102,3 +102,35 @@ def test_create_segment_blocks_duplicate_name(mock_build):
     assert "already exists" in result.output
     assert "DUP1" in result.output
     assert len(calls) == 1  # no POST
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_get_segment_renders_negative_consent(mock_build):
+    """can_receive_marketing: false must not render as 'can receive'."""
+    seg = {
+        "data": {
+            "id": "SEG9",
+            "attributes": {
+                "name": "Suppressed People",
+                "profile_count": 10,
+                "definition": {
+                    "condition_groups": [
+                        {"conditions": [{
+                            "type": "profile-marketing-consent",
+                            "consent": {"channel": "email", "can_receive_marketing": False},
+                        }]},
+                        {"conditions": [{
+                            "type": "profile-marketing-consent",
+                            "consent": {"channel": "email", "can_receive_marketing": True},
+                        }]},
+                    ]
+                },
+            },
+        }
+    }
+    ctx_obj, calls = _fake_ctx_factory([seg, _METRICS_PAGE])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["get-segment", "SEG9"])
+    assert result.exit_code == 0, result.output
+    assert "can NOT receive email marketing (suppressed or no consent)" in result.output
+    assert "2. can receive email marketing" in result.output

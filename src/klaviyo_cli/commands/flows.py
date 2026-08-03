@@ -1,11 +1,11 @@
-"""Flow commands: list, performance, and full step-by-step detail."""
+"""Flow commands: list, get, create, performance, and full step-by-step detail."""
 
 import json as json_module
 from datetime import datetime
 
 import click
 
-from .._util import output
+from .._util import _norm_name, output
 from ..cli import main
 from ..transport import APIError, AuthError, KLAVIYO_BASE
 
@@ -14,28 +14,47 @@ from ..transport import APIError, AuthError, KLAVIYO_BASE
 # ---------------------------------------------------------------------------
 
 
+_FLOW_SORT = {"updated": "-updated", "created": "-created", "name": "name"}
+
+
 @main.command("flows")
+@click.option("--sort", "sort_key", type=click.Choice(["updated", "created", "name"]),
+              default=None, help="Sort by updated/created (newest first) or name (A-Z)")
+@click.option("--search", "search_term", default=None,
+              help="Filter by name (case-insensitive substring)")
 @click.pass_context
-def flows(ctx):
-    """List all flows for a client."""
+def flows(ctx, sort_key, search_term):
+    """List all flows for a client, with optional sort and name search."""
     use_json = ctx.obj["json"]
     try:
         items: list = []
         path = "/api/flows/?fields[flow]=name,status,created,updated&page[size]=50"
+        if sort_key:
+            path += f"&sort={_FLOW_SORT[sort_key]}"
         while path:
             data = ctx.obj["call"]("GET", path)
             items.extend(data.get("data", []))
             next_link = data.get("links", {}).get("next")
             path = next_link.replace(KLAVIYO_BASE, "") if next_link else None
 
+        matches = items
+        if search_term:
+            term = search_term.lower()
+            matches = [i for i in items
+                       if term in (i.get("attributes", {}).get("name", "").lower())]
+
         if use_json:
-            output({"data": items}, use_json=True)
+            output({"data": matches}, use_json=True)
         else:
-            print(f"Flows for {ctx.obj['label']} ({len(items)} total):")
-            if not items:
+            if search_term:
+                print(f"Flows matching '{search_term}' for {ctx.obj['label']} "
+                      f"({len(matches)} of {len(items)}):")
+            else:
+                print(f"Flows for {ctx.obj['label']} ({len(matches)} total):")
+            if not matches:
                 print("  (none)")
                 return
-            for item in items:
+            for item in matches:
                 attrs = item.get("attributes", {})
                 updated = (attrs.get("updated") or "").split("T")[0] or "?"
                 print(
@@ -139,7 +158,7 @@ def flow_performance(ctx, days):
                 crate = (t["clicks"] / t["delivered"] * 100) if t["delivered"] > 0 else 0
                 total_rev += t["revenue"]
                 print(f"  {name:<50} ${t['revenue']:>9,.2f} {t['delivered']:>8,} {orate:>6.1f}% {crate:>6.1f}% {t['unsubs']:>7,}")
-            print(f"\n  {'TOTAL'::<50} ${total_rev:>9,.2f}")
+            print(f"\n  {'TOTAL':<50} ${total_rev:>9,.2f}")
     except (AuthError, APIError) as e:
         raise click.ClickException(str(e))
 
@@ -317,5 +336,164 @@ def flow_detail(ctx, flow_id):
                     print(f"  ? {atype} (status: {astatus})")
                     print()
 
+    except (AuthError, APIError) as e:
+        raise click.ClickException(str(e))
+
+
+# ---------------------------------------------------------------------------
+# get-flow
+# ---------------------------------------------------------------------------
+
+
+@main.command("get-flow")
+@click.argument("flow_id")
+@click.option("--definition", "show_definition", is_flag=True,
+              help="Include the flow definition (trigger, action chain, reentry)")
+@click.pass_context
+def get_flow(ctx, flow_id, show_definition):
+    """Show a flow's basics in one call; --definition adds trigger, action chain, reentry.
+
+    Cheap single-GET alternative to `flow-detail`, which walks every action
+    and message with extra API calls to pull subjects, senders, and templates.
+    Use this for a quick look; use `flow-detail` for the full step-by-step dump.
+    """
+    use_json = ctx.obj["json"]
+    try:
+        path = f"/api/flows/{flow_id}/"
+        if show_definition:
+            path += "?additional-fields[flow]=definition"
+        data = ctx.obj["call"]("GET", path)
+        if use_json:
+            output(data, use_json=True)
+            return
+        attrs = data.get("data", {}).get("attributes", {})
+        print(f"Flow: {attrs.get('name', '?')}")
+        print(f"  ID: {flow_id}")
+        print(f"  Status: {attrs.get('status', '?')}")
+        print(f"  Trigger type: {attrs.get('trigger_type', '?')}")
+        print(f"  Created: {(attrs.get('created') or '?').split('T')[0]}")
+        print(f"  Updated: {(attrs.get('updated') or '?').split('T')[0]}")
+
+        if show_definition:
+            definition = attrs.get("definition") or {}
+            for t in definition.get("triggers", []):
+                print(f"  Trigger: {t.get('type', '?')} (id: {t.get('id', '?')})")
+
+            actions = definition.get("actions", [])
+            if actions:
+                print(f"\nActions ({len(actions)} steps):")
+                for i, a in enumerate(actions, 1):
+                    atype = a.get("type", "?")
+                    line = f"  {i}. {atype}"
+                    if atype == "send-webhook":
+                        a_data = a.get("data") or {}
+                        url = a_data.get("url") or a_data.get("webhook_url")
+                        if url:
+                            line += f" -> {url}"
+                    print(line)
+
+            reentry = definition.get("reentry_criteria") or {}
+            if reentry:
+                dur = reentry.get("duration", "?")
+                unit = reentry.get("unit", "?")
+                print(f"\nReentry: every {dur} {unit}(s)")
+    except (AuthError, APIError) as e:
+        raise click.ClickException(str(e))
+
+
+# ---------------------------------------------------------------------------
+# create-flow (dedup-guarded)
+# ---------------------------------------------------------------------------
+
+
+@main.command("create-flow")
+@click.option("--body", "body_arg", required=True,
+              help="Flow JSON (full data envelope, {name, definition}, or bare definition), or @file.json")
+@click.option("--name", default=None,
+              help="Flow name (required when --body is a bare definition)")
+@click.option("--fix-ids", is_flag=True,
+              help='Auto-rename action "id" keys to "temporary_id" (required by the create API)')
+@click.option("--force", is_flag=True, help="Create even if a same-named flow exists")
+@click.pass_context
+def create_flow(ctx, body_arg, name, fix_ids, force):
+    """Create a flow (in draft) from a definition, guarding against duplicates.
+
+    Accepts a full {"data": ...} envelope, a {"name", "definition"} object,
+    or a bare definition plus --name. Klaviyo's create API requires actions
+    to carry "temporary_id" instead of "id" (entry_action_id and links.next
+    reference those temporary_ids); pass --fix-ids to auto-rename.
+    """
+    use_json = ctx.obj["json"]
+    try:
+        if body_arg.startswith("@"):
+            with open(body_arg[1:]) as f:
+                parsed = json_module.load(f)
+        else:
+            parsed = json_module.loads(body_arg)
+
+        # Accept: full {data:...} envelope, {name, definition} attributes, or bare definition.
+        if isinstance(parsed, dict) and "data" in parsed:
+            attrs = parsed["data"].get("attributes") or {}
+            definition = attrs.get("definition") or {}
+            flow_name = name or attrs.get("name")
+        elif isinstance(parsed, dict) and "definition" in parsed:
+            definition = parsed["definition"]
+            flow_name = name or parsed.get("name")
+        else:
+            definition = parsed
+            flow_name = name
+
+        if not isinstance(definition, dict) or "actions" not in definition:
+            raise click.ClickException(
+                "Body must contain a flow definition with 'actions' (directly, "
+                "under 'definition', or in a full data envelope)."
+            )
+        if not flow_name:
+            raise click.UsageError("--name is required when the body doesn't include a name.")
+
+        # The create API rejects actions keyed by "id" — it wants "temporary_id"
+        # (and entry_action_id / links.next reference those temporary_ids).
+        bad = [a for a in definition.get("actions", []) if isinstance(a, dict) and "id" in a]
+        if bad:
+            if fix_ids:
+                for a in bad:
+                    a["temporary_id"] = a.pop("id")
+            else:
+                raise click.ClickException(
+                    f'{len(bad)} action(s) use "id", but the flow create API requires '
+                    '"temporary_id" on submitted actions (entry_action_id and links.next '
+                    "keep referencing the same values). Rename each action's \"id\" to "
+                    '"temporary_id", or pass --fix-ids to auto-rename them.'
+                )
+
+        # Dedup guard — fetch existing flow names.
+        existing: list = []
+        path = "/api/flows/?fields[flow]=name&page[size]=50"
+        while path:
+            data = ctx.obj["call"]("GET", path)
+            existing.extend(data.get("data", []))
+            next_link = data.get("links", {}).get("next")
+            path = next_link.replace(KLAVIYO_BASE, "") if next_link else None
+
+        target = _norm_name(flow_name)
+        exact = [f for f in existing
+                 if _norm_name(f.get("attributes", {}).get("name", "")) == target]
+        if exact and not force:
+            lines = "\n".join(f"  [{f['id']}] {f['attributes']['name']}" for f in exact)
+            raise click.ClickException(
+                f"A flow named '{flow_name}' already exists:\n{lines}\n"
+                f"Reuse it, or pass --force to create a duplicate anyway."
+            )
+
+        payload = {"data": {"type": "flow",
+                            "attributes": {"name": flow_name, "definition": definition}}}
+        result = ctx.obj["call"]("POST", "/api/flows/", body=payload)
+        new = result.get("data", {})
+        if use_json:
+            output(result, use_json=True)
+        else:
+            print(f"Created flow [{new.get('id', '?')}] "
+                  f"{new.get('attributes', {}).get('name', flow_name)}")
+            print("Flow created in draft. Review in Klaviyo UI before setting live.")
     except (AuthError, APIError) as e:
         raise click.ClickException(str(e))

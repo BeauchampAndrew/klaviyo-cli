@@ -33,7 +33,7 @@ klaviyo account-health
 klaviyo --json list-campaigns --days 30
 ```
 
-Destructive Klaviyo operations are blocked at the CLI level. Klaviyo's DELETE endpoints for profiles, lists, segments, campaigns, and flows are not reachable through this tool, even via the raw `api` passthrough. Only template deletion is allowlisted (`transport.py`, `DELETE_ALLOWED_PATHS`). This is why it's safe to hand `klaviyo-cli` to an agent with a live API key: the agent can read anything and change campaign content, timing, and audiences, but it cannot delete subscriber data, segments, or send history.
+Destructive Klaviyo operations are blocked at the CLI level. Klaviyo's DELETE endpoints for profiles, lists, segments, campaigns, and flows are not reachable through this tool, even via the raw `api` passthrough. Only template deletion is allowlisted (`transport.py`, `DELETE_ALLOWED_PATHS`). This is why it's safe to hand `klaviyo-cli` to an agent with a live API key: the agent can read anything and change campaign content, timing, and audiences, but it cannot delete subscriber data, segments, or send history. One command can stop mail going to real people: `suppress`. It deletes nothing, but because it halts sends it requires an explicit `--yes` flag or an interactive confirmation before it runs.
 
 Drop this in your repo's `CLAUDE.md` so an agent knows the tool exists:
 
@@ -75,9 +75,26 @@ Run `klaviyo COMMAND --help` for full options on any command.
 ### Flows
 | Command | Description |
 |---|---|
-| `flows` | List all flows for a client |
+| `flows` | List all flows for a client, with optional sort and name search |
+| `get-flow` | Show a flow's basics in one call; `--definition` adds trigger, action chain, reentry |
 | `flow-detail` | Show full flow structure: trigger, filters, emails with subjects, delays, splits |
 | `flow-performance` | Show flow revenue and engagement metrics |
+| `create-flow` | Create a flow (in draft) from a definition, guarding against duplicates |
+
+### Profiles
+| Command | Description |
+|---|---|
+| `get-profile` | Look up a profile by email or ID; `--subscriptions` adds consent state and suppressions |
+| `segment-members` | List profiles in a segment: email, name, and when they joined |
+| `suppress` | Suppress profiles from email marketing in bulk (requires `--yes` or confirmation) |
+| `unsuppress` | Remove manual suppressions in bulk (never resubscribes anyone) |
+| `suppression-jobs` | List bulk suppression jobs (suppress + unsuppress) with status and counts |
+
+### Events
+| Command | Description |
+|---|---|
+| `push-event` | Push a custom event to a profile by email (creates the profile if needed) |
+| `events` | List recent events for a metric ID, newest first, with the profile attached |
 
 ### Metrics
 | Command | Description |
@@ -96,7 +113,7 @@ Run `klaviyo COMMAND --help` for full options on any command.
 |---|---|
 | `api` | Raw API pass-through: `klaviyo api <METHOD> <path>` |
 
-That's 23 commands total.
+That's 32 commands total.
 
 ## Multi-account profiles
 

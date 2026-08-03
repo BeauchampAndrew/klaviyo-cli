@@ -139,7 +139,10 @@ def _format_condition(cond: dict, metric_map: dict) -> str:
     """Render a single segment condition to a human-readable string."""
     t = cond.get("type")
     if t == "profile-marketing-consent":
-        ch = (cond.get("consent") or {}).get("channel", "?")
+        consent = cond.get("consent") or {}
+        ch = consent.get("channel", "?")
+        if consent.get("can_receive_marketing") is False:
+            return f"can NOT receive {ch} marketing (suppressed or no consent)"
         return f"can receive {ch} marketing"
     if t == "profile-property":
         prop = cond.get("property", "?")
