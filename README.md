@@ -3,7 +3,7 @@
 A command-line interface for Klaviyo: campaigns, segments, flows, metrics, and scheduling. Built for humans and AI agents.
 
 ```bash
-uvx klaviyo-cli --help
+uvx --from klaviyo-cli klaviyo --help
 ```
 
 No install needed. Or install it: `pipx install klaviyo-cli` or `uv tool install klaviyo-cli`. Requires Python 3.11+.
