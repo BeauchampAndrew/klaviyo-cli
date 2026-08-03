@@ -1,3 +1,4 @@
 """Import command modules so they register on the main group."""
-# Modules are added here in Tasks 5-8, e.g.:
-# from . import campaigns, segments, flows, metrics, sms, raw  # noqa: F401
+from . import campaigns  # noqa: F401
+# Remaining modules are added in Tasks 6-8, e.g.:
+# from . import segments, flows, metrics, sms, raw  # noqa: F401
