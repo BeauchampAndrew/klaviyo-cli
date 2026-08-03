@@ -2,7 +2,7 @@
 its own auth (e.g. an agency CLI with per-client credentials and a leading
 ACCOUNT positional).
 
-Kept stable on purpose: host packages (e.g. workspace-cli) import
+Kept stable on purpose: host packages (e.g. an internal agency CLI) import
 ``wrap_with_account`` and ``build_host_group`` directly.
 
 How the click plumbing works, for anyone touching this file:
