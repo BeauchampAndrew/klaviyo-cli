@@ -27,10 +27,10 @@ klaviyo account-health
 
 ## Using with Claude Code and AI agents
 
-Every command supports `--json` for machine-readable output:
+`--json` is a global flag: put it before the command name for machine-readable output on any command:
 
 ```bash
-klaviyo list-campaigns --days 30 --json
+klaviyo --json list-campaigns --days 30
 ```
 
 Destructive Klaviyo operations are blocked at the CLI level. Klaviyo's DELETE endpoints for profiles, lists, segments, campaigns, and flows are not reachable through this tool, even via the raw `api` passthrough. Only template deletion is allowlisted (`transport.py`, `DELETE_ALLOWED_PATHS`). This is why it's safe to hand `klaviyo-cli` to an agent with a live API key: the agent can read anything and change campaign content, timing, and audiences, but it cannot delete subscriber data, segments, or send history.
@@ -40,8 +40,9 @@ Drop this in your repo's `CLAUDE.md` so an agent knows the tool exists:
 ```markdown
 ## Klaviyo
 Use the `klaviyo` CLI for Klaviyo data and actions (campaigns, segments,
-flows, metrics). Auth via KLAVIYO_API_KEY env var. Every command supports
---json. Run `klaviyo --help` for the full command list.
+flows, metrics). Auth via KLAVIYO_API_KEY env var. Pass --json before the
+command for machine-readable output (e.g. `klaviyo --json list-campaigns`).
+Run `klaviyo --help` for the full command list.
 ```
 
 ## Command reference
