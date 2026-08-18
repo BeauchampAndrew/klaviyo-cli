@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "klaviyo-cli"
-version = "0.4.0"
+version = "0.5.0"
 description = "Unofficial Klaviyo CLI: campaigns, segments, flows, metrics, scheduling. Built for humans and AI agents."
 readme = "README.md"
 license = "MIT"
