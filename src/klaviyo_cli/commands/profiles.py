@@ -179,6 +179,69 @@ def unsuppress(ctx, emails, file_path):
 
 
 # ---------------------------------------------------------------------------
+# unsubscribe (bulk consent revocation)
+# ---------------------------------------------------------------------------
+
+# Klaviyo caps subscription bulk jobs at 100 profiles per request.
+_UNSUBSCRIBE_BATCH = 100
+
+
+@main.command("unsubscribe")
+@click.option("--emails", default=None, help="Comma-separated email addresses")
+@click.option("--file", "file_path", default=None, type=click.Path(exists=True),
+              help="File with one email address per line")
+@click.option("--list", "list_id", default=None,
+              help="Unsubscribe from this list only instead of all email marketing")
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt")
+@click.pass_context
+def unsubscribe(ctx, emails, file_path, list_id, yes):
+    """Set profiles' email consent to UNSUBSCRIBED (bulk, by email address).
+
+    Unlike `suppress`, this revokes consent rather than adding a removable
+    suppression: an UNSUBSCRIBED profile cannot be resubscribed through the
+    API — only the person can opt back in via a signup form. Works on
+    NEVER_SUBSCRIBED profiles too. Any existing manual suppression is
+    replaced by an UNSUBSCRIBE suppression (the activity log shows a
+    "manually unsuppressed" event immediately followed by the unsubscribe;
+    the profile is never mailable in between).
+
+    Because this is irreversible from the account side, it asks for
+    confirmation unless --yes is passed. Batches of 100 per API job.
+    """
+    use_json = ctx.obj["json"]
+    addresses = _collect_emails(emails, file_path)
+    if not yes:
+        scope = f"list {list_id}" if list_id else "ALL email marketing"
+        click.confirm(
+            f"Unsubscribe {len(addresses)} profile(s) from {scope}? "
+            "This cannot be undone via the API",
+            abort=True,
+        )
+    try:
+        results = []
+        for start in range(0, len(addresses), _UNSUBSCRIBE_BATCH):
+            batch = addresses[start:start + _UNSUBSCRIBE_BATCH]
+            body = _suppression_body("profile-subscription-bulk-delete-job", batch)
+            if list_id:
+                body["data"]["relationships"] = {
+                    "list": {"data": {"type": "list", "id": list_id}}
+                }
+            results.append(ctx.obj["call"](
+                "POST", "/api/profile-subscription-bulk-delete-jobs/", body=body
+            ))
+        if use_json:
+            output(results[0] if len(results) == 1 else {"jobs": results},
+                   use_json=True)
+        else:
+            _print_job_result(results[0], "Unsubscribe", len(addresses))
+            if len(results) > 1:
+                print(f"  Submitted as {len(results)} jobs of up to "
+                      f"{_UNSUBSCRIBE_BATCH}.")
+    except (AuthError, APIError) as e:
+        raise click.ClickException(str(e))
+
+
+# ---------------------------------------------------------------------------
 # suppression-jobs
 # ---------------------------------------------------------------------------
 

@@ -265,3 +265,86 @@ def test_segment_members_paginates_and_truncates_over_100(mock_build):
     assert "(150 shown)" in result.output
     assert "u149@x.com" in result.output
     assert "u150@x.com" not in result.output
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_unsubscribe_with_yes_posts_bulk_job(mock_build):
+    ctx_obj, calls = _fake_ctx_factory([_JOB_RESP])
+    mock_build.return_value = ctx_obj
+
+    result = CliRunner().invoke(
+        main, ["unsubscribe", "--emails", "a@x.com,b@y.com", "--yes"]
+    )
+
+    assert result.exit_code == 0, result.output
+    method, path, body = calls[0]
+    assert method == "POST"
+    assert path == "/api/profile-subscription-bulk-delete-jobs/"
+    assert body["data"]["type"] == "profile-subscription-bulk-delete-job"
+    assert "relationships" not in body["data"]
+    profiles = body["data"]["attributes"]["profiles"]["data"]
+    assert [p["attributes"]["email"] for p in profiles] == ["a@x.com", "b@y.com"]
+    assert "2 email(s)" in result.output
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_unsubscribe_without_yes_noninteractive_makes_no_calls(mock_build):
+    ctx_obj, calls = _fake_ctx_factory([])
+    mock_build.return_value = ctx_obj
+
+    result = CliRunner().invoke(main, ["unsubscribe", "--emails", "a@x.com"])
+
+    assert result.exit_code != 0
+    assert len(calls) == 0
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_unsubscribe_confirmation_declined_makes_no_calls(mock_build):
+    ctx_obj, calls = _fake_ctx_factory([])
+    mock_build.return_value = ctx_obj
+
+    result = CliRunner().invoke(
+        main, ["unsubscribe", "--emails", "a@x.com"], input="n\n"
+    )
+
+    assert result.exit_code != 0
+    assert len(calls) == 0
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_unsubscribe_batches_over_100(mock_build, tmp_path):
+    emails_file = tmp_path / "emails.txt"
+    emails_file.write_text("".join(f"u{i}@x.com\n" for i in range(154)))
+    # 202s with empty bodies, one per batch.
+    ctx_obj, calls = _fake_ctx_factory([{}, {}])
+    mock_build.return_value = ctx_obj
+
+    result = CliRunner().invoke(
+        main, ["unsubscribe", "--file", str(emails_file), "--yes"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 2
+    first = calls[0][2]["data"]["attributes"]["profiles"]["data"]
+    second = calls[1][2]["data"]["attributes"]["profiles"]["data"]
+    assert len(first) == 100
+    assert len(second) == 54
+    assert "154 email(s)" in result.output
+    assert "2 jobs" in result.output
+    assert "Accepted (202)" in result.output
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_unsubscribe_list_scoped(mock_build):
+    ctx_obj, calls = _fake_ctx_factory([_JOB_RESP])
+    mock_build.return_value = ctx_obj
+
+    result = CliRunner().invoke(
+        main, ["unsubscribe", "--emails", "a@x.com", "--list", "LIST1", "--yes"]
+    )
+
+    assert result.exit_code == 0, result.output
+    body = calls[0][2]
+    assert body["data"]["relationships"]["list"]["data"] == {
+        "type": "list", "id": "LIST1"
+    }
