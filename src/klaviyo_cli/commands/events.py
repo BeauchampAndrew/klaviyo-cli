@@ -80,6 +80,80 @@ def push_event(ctx, email, metric_name, time_arg, value, properties, profile_att
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# export-events
+# ---------------------------------------------------------------------------
+
+
+@main.command("export-events")
+@click.option("--metric", "metric_id", required=True,
+              help="Metric ID (from list-metrics)")
+@click.option("--since", default=None,
+              help="Only events on/after this ISO date/datetime")
+@click.option("--until", default=None,
+              help="Only events before this ISO date/datetime")
+@click.option("--fields", default="datetime,event_properties",
+              help="Sparse event fields to fetch (comma-separated), "
+                   "or 'all' for full events")
+@click.option("--out", "out_path", default=None,
+              help="Write NDJSON to this file instead of stdout")
+@click.option("--max-pages", default=500,
+              help="Safety cap on pages fetched (200 events/page)")
+@click.pass_context
+def export_events(ctx, metric_id, since, until, fields, out_path, max_pages):
+    """Bulk-export ALL events for a metric in a window, as NDJSON.
+
+    Unlike `events` (a sampling/inspection tool), this follows the pagination
+    cursor until the window is exhausted — use it to feed reports and scripts.
+    One JSON event object per line, ascending datetime, to stdout or --out.
+    Progress goes to stderr. By default only datetime and event_properties are
+    fetched (events are large); pass --fields all for complete events.
+    """
+    try:
+        conditions = [f'equals(metric_id,"{metric_id}")']
+        if since:
+            conditions.append(f"greater-or-equal(datetime,{since})")
+        if until:
+            conditions.append(f"less-than(datetime,{until})")
+        filter_str = (conditions[0] if len(conditions) == 1
+                      else f"and({','.join(conditions)})")
+        path = (f"/api/events/?filter={urllib.parse.quote(filter_str)}"
+                f"&sort=datetime&page[size]=200")
+        if fields != "all":
+            path += f"&fields[event]={fields}"
+
+        sink = open(out_path, "w") if out_path else None
+        pages = total = 0
+        try:
+            while path:
+                if pages >= max_pages:
+                    click.echo(
+                        f"WARNING: stopped at --max-pages {max_pages}; "
+                        f"output is truncated. Narrow the window or raise "
+                        f"--max-pages.", err=True)
+                    break
+                data = ctx.obj["call"]("GET", path)
+                pages += 1
+                for ev in data.get("data", []):
+                    line = json_module.dumps(ev, default=str)
+                    if sink:
+                        sink.write(line + "\n")
+                    else:
+                        click.echo(line)
+                total += len(data.get("data", []))
+                click.echo(f"  page {pages}: {total} events so far", err=True)
+                next_link = data.get("links", {}).get("next")
+                path = (next_link.replace("https://a.klaviyo.com", "")
+                        if next_link else None)
+        finally:
+            if sink:
+                sink.close()
+        click.echo(f"Exported {total} events ({pages} pages)"
+                   + (f" to {out_path}" if out_path else ""), err=True)
+    except (AuthError, APIError) as e:
+        raise click.ClickException(str(e))
+
+
 @main.command("events")
 @click.option("--metric", "metric_id", required=True,
               help="Metric ID (from list-metrics)")

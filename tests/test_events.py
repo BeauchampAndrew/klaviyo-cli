@@ -180,3 +180,101 @@ def test_events_paginates_up_to_limit(mock_build):
     assert result.exit_code == 0, result.output
     assert len(calls) == 2
     assert "E3" not in result.output or "3 shown" in result.output
+
+
+# ---------------------------------------------------------------------------
+# export-events
+# ---------------------------------------------------------------------------
+
+
+def _export_event(i):
+    return {"id": f"E{i}", "type": "event",
+            "attributes": {"datetime": f"2026-08-1{i}T00:00:00+00:00",
+                           "event_properties": {"$value": i * 10.0}}}
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_export_events_streams_ndjson_across_all_pages(mock_build):
+    import json
+
+    page1 = {"data": [_export_event(1), _export_event(2)],
+             "links": {"next": "https://a.klaviyo.com/api/events/?page%5Bcursor%5D=NEXT"}}
+    page2 = {"data": [_export_event(3)], "links": {"next": None}}
+    ctx_obj, calls = _fake_ctx_factory([page1, page2])
+    mock_build.return_value = ctx_obj
+
+    result = CliRunner().invoke(main, [
+        "export-events", "--metric", "XNPwvq",
+        "--since", "2026-08-11", "--until", "2026-08-14",
+    ])
+
+    assert result.exit_code == 0, result.output
+    # Exhaustive: follows the cursor with no limit.
+    assert len(calls) == 2
+    path = calls[0][1]
+    assert "equals%28metric_id%2C%22XNPwvq%22%29" in path
+    assert "greater-or-equal%28datetime%2C2026-08-11%29" in path
+    assert "less-than%28datetime%2C2026-08-14%29" in path
+    assert "page[size]=200" in path
+    assert "sort=datetime" in path  # ascending: stable for exports
+    # Sparse fields by default: events are huge; only pull what reports need.
+    assert "fields[event]=datetime,event_properties" in path
+    # Second call follows the next link with the origin stripped.
+    assert calls[1][1].startswith("/api/events/?page")
+    # stdout is pure NDJSON: one parseable object per line, in order.
+    lines = [l for l in result.stdout.splitlines() if l.strip()]
+    assert len(lines) == 3
+    parsed = [json.loads(l) for l in lines]
+    assert [p["id"] for p in parsed] == ["E1", "E2", "E3"]
+    assert parsed[0]["attributes"]["event_properties"] == {"$value": 10.0}
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_export_events_writes_out_file(mock_build):
+    import json
+
+    page = {"data": [_export_event(1)], "links": {"next": None}}
+    ctx_obj, calls = _fake_ctx_factory([page])
+    mock_build.return_value = ctx_obj
+
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        result = runner.invoke(main, [
+            "export-events", "--metric", "M1", "--out", "events.ndjson",
+        ])
+        assert result.exit_code == 0, result.output
+        with open("events.ndjson") as f:
+            lines = [json.loads(l) for l in f if l.strip()]
+    assert [l["id"] for l in lines] == ["E1"]
+    assert result.stdout == ""  # NDJSON went to the file, not stdout
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_export_events_max_pages_guard_warns_on_truncation(mock_build):
+    endless = {"data": [_export_event(1)],
+               "links": {"next": "https://a.klaviyo.com/api/events/?page%5Bcursor%5D=X"}}
+    ctx_obj, calls = _fake_ctx_factory([dict(endless), dict(endless), dict(endless)])
+    mock_build.return_value = ctx_obj
+
+    result = CliRunner().invoke(main, [
+        "export-events", "--metric", "M1", "--max-pages", "2",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 2
+    # Never truncate silently.
+    assert "truncated" in result.stderr.lower()
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_export_events_fields_all_drops_sparse_fieldset(mock_build):
+    page = {"data": [_export_event(1)], "links": {"next": None}}
+    ctx_obj, calls = _fake_ctx_factory([page])
+    mock_build.return_value = ctx_obj
+
+    result = CliRunner().invoke(main, [
+        "export-events", "--metric", "M1", "--fields", "all",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert "fields[event]" not in calls[0][1]

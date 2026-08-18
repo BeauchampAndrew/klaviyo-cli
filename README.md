@@ -98,6 +98,7 @@ Run `klaviyo COMMAND --help` for full options on any command.
 |---|---|
 | `push-event` | Push a custom event to a profile by email (creates the profile if needed) |
 | `events` | List recent events for a metric ID; `--since/--until` windows, `--properties` payloads |
+| `export-events` | Bulk-export ALL events for a metric in a window as NDJSON (exhaustive pagination; `--out` file, `--fields`, `--max-pages` guard) |
 
 ### Metrics
 | Command | Description |
