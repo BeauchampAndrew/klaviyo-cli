@@ -33,7 +33,7 @@ klaviyo account-health
 klaviyo --json list-campaigns --days 30
 ```
 
-Destructive Klaviyo operations are blocked at the CLI level. Klaviyo's DELETE endpoints for profiles, lists, segments, campaigns, and flows are not reachable through this tool, even via the raw `api` passthrough. Only template deletion is allowlisted (`transport.py`, `DELETE_ALLOWED_PATHS`). This is why it's safe to hand `klaviyo-cli` to an agent with a live API key: the agent can read anything and change campaign content, timing, and audiences, but it cannot delete subscriber data, segments, or send history. Two commands can stop mail going to real people, and both require an explicit `--yes` flag or an interactive confirmation before they run: `suppress` (reversible — `unsuppress` undoes it) and `unsubscribe` (irreversible — it revokes consent, and Klaviyo does not allow resubscribing anyone through the API; only the person can opt back in via a signup form).
+Destructive Klaviyo operations are blocked at the CLI level. Klaviyo's DELETE endpoints for profiles, lists, segments, campaigns, and flows are not reachable through this tool, even via the raw `api` passthrough. Only template deletion is allowlisted (`transport.py`, `DELETE_ALLOWED_PATHS`). This is why it's safe to hand `klaviyo-cli` to an agent with a live API key: the agent can read anything and change campaign content, timing, and audiences, but it cannot delete subscriber data, segments, or send history. Two commands can stop mail going to real people, and both require an explicit `--yes` flag or an interactive confirmation before they run: `suppress` (reversible — `unsuppress` undoes it) and `unsubscribe` (it revokes consent, which `unsuppress` cannot undo; reversing it takes a deliberate call to Klaviyo's bulk subscribe endpoint asserting fresh consent, which this CLI intentionally does not wrap).
 
 Drop this in your repo's `CLAUDE.md` so an agent knows the tool exists:
 
@@ -90,7 +90,7 @@ Run `klaviyo COMMAND --help` for full options on any command.
 | `segment-members` | List profiles in a segment: email, name, and when they joined |
 | `suppress` | Suppress profiles from email marketing in bulk (requires `--yes` or confirmation) |
 | `unsuppress` | Remove manual suppressions in bulk (never resubscribes anyone) |
-| `unsubscribe` | Set email consent to UNSUBSCRIBED in bulk — irreversible via API; `--list` scopes to one list (requires `--yes` or confirmation) |
+| `unsubscribe` | Set email consent to UNSUBSCRIBED in bulk — `unsuppress` can't undo it; `--list` scopes to one list (requires `--yes` or confirmation) |
 | `suppression-jobs` | List bulk suppression jobs (suppress + unsuppress) with status and counts |
 
 ### Events

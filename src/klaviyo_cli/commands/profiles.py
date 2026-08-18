@@ -198,15 +198,18 @@ def unsubscribe(ctx, emails, file_path, list_id, yes):
     """Set profiles' email consent to UNSUBSCRIBED (bulk, by email address).
 
     Unlike `suppress`, this revokes consent rather than adding a removable
-    suppression: an UNSUBSCRIBED profile cannot be resubscribed through the
-    API — only the person can opt back in via a signup form. Works on
-    NEVER_SUBSCRIBED profiles too. Any existing manual suppression is
-    replaced by an UNSUBSCRIBE suppression (the activity log shows a
-    "manually unsuppressed" event immediately followed by the unsubscribe;
-    the profile is never mailable in between).
+    suppression: `unsuppress` cannot undo it (it only clears USER_SUPPRESSED
+    records). Reversing an unsubscribe takes a deliberate subscribe call
+    asserting fresh consent — Klaviyo's bulk subscribe endpoint, which this
+    CLI intentionally does not wrap — or the person opting back in via a
+    signup form. Works on NEVER_SUBSCRIBED profiles too. Any existing manual
+    suppression is replaced by an UNSUBSCRIBE suppression (the activity log
+    shows a "manually unsuppressed" event immediately followed by the
+    unsubscribe; the profile is never mailable in between).
 
-    Because this is irreversible from the account side, it asks for
-    confirmation unless --yes is passed. Batches of 100 per API job.
+    Because this revokes real people's consent and cannot be reversed
+    without asserting they re-consented, it asks for confirmation unless
+    --yes is passed. Batches of 100 per API job.
     """
     use_json = ctx.obj["json"]
     addresses = _collect_emails(emails, file_path)
@@ -214,7 +217,7 @@ def unsubscribe(ctx, emails, file_path, list_id, yes):
         scope = f"list {list_id}" if list_id else "ALL email marketing"
         click.confirm(
             f"Unsubscribe {len(addresses)} profile(s) from {scope}? "
-            "This cannot be undone via the API",
+            "This revokes consent; unsuppress cannot undo it",
             abort=True,
         )
     try:
