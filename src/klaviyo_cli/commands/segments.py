@@ -98,6 +98,59 @@ def segment_sizes(ctx):
 
 
 # ---------------------------------------------------------------------------
+# list-sizes
+# ---------------------------------------------------------------------------
+
+
+@main.command("list-sizes")
+@click.pass_context
+def list_sizes(ctx):
+    """Show all lists with profile counts, newest first.
+
+    profile_count is rate limited hard (burst 1/s, steady 15/m), so accounts
+    with many lists take a few minutes; progress prints as counts arrive.
+    """
+    import time as _time
+    use_json = ctx.obj["json"]
+    try:
+        all_lists: list = []
+        path = "/api/lists/?fields[list]=name,created,updated"
+        while path:
+            data = ctx.obj["call"]("GET", path)
+            all_lists.extend(data.get("data", []))
+            next_link = data.get("links", {}).get("next")
+            path = next_link.replace(KLAVIYO_BASE, "") if next_link else None
+
+        all_lists.sort(key=lambda x: x.get("attributes", {}).get("created", ""), reverse=True)
+        if not use_json:
+            print(f"Lists for {ctx.obj['label']} ({len(all_lists)} total):\n")
+            print(f"  {'List':<62} {'ID':<10} {'Created':>12} {'Profiles':>10}")
+            print(f"  {'-'*98}")
+        results = []
+        for item in all_lists:
+            detail = ctx.obj["call"](
+                "GET", f"/api/lists/{item['id']}/?additional-fields[list]=profile_count"
+            )
+            attrs = detail.get("data", {}).get("attributes", {})
+            count = attrs.get("profile_count")
+            results.append({
+                "id": item["id"],
+                "name": attrs.get("name") or item.get("attributes", {}).get("name", "?"),
+                "created": item.get("attributes", {}).get("created"),
+                "profile_count": count,
+            })
+            if not use_json:
+                created = (item.get("attributes", {}).get("created") or "").split("T")[0]
+                shown = "?" if count is None else f"{count:,}"
+                print(f"  {results[-1]['name'][:60]:<62} {item['id']:<10} {created:>12} {shown:>10}")
+            _time.sleep(1)
+        if use_json:
+            output(results, use_json=True)
+    except (AuthError, APIError) as e:
+        raise click.ClickException(str(e))
+
+
+# ---------------------------------------------------------------------------
 # segment-count
 # ---------------------------------------------------------------------------
 

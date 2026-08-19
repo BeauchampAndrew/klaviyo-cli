@@ -1,6 +1,7 @@
 """Transport layer: talks to the Klaviyo API. Auth-agnostic commands call this."""
 
 import re
+import time
 
 import requests
 
@@ -39,6 +40,17 @@ def ensure_delete_allowed(path: str) -> None:
         )
 
 
+def normalize_path(path: str) -> str:
+    """Every public Klaviyo endpoint lives under /api/. Accept bare paths like
+    'lists?...' or '/lists' so callers don't have to remember the prefix —
+    without it the request hits the web app root and returns an HTML page."""
+    if not path.startswith("/"):
+        path = "/" + path
+    if not path.startswith("/api"):
+        path = "/api" + path
+    return path
+
+
 def _extract_error(resp: requests.Response) -> str:
     try:
         data = resp.json()
@@ -67,12 +79,18 @@ def _check_response(resp: requests.Response) -> dict:
 class DirectTransport:
     """Calls a.klaviyo.com directly with a private API key."""
 
+    # 429 retry: Klaviyo's per-endpoint limits are easy to hit on count
+    # endpoints (burst 1/s, steady 15/m on profile_count). Honor Retry-After
+    # so loops over many lists/segments survive without per-command backoff.
+    MAX_429_RETRIES = 5
+
     def __init__(self, api_key: str):
         self.api_key = api_key
 
     def call(self, method: str, path: str, body: dict | None = None,
              revision: str | None = None) -> dict:
         method = method.upper()
+        path = normalize_path(path)
         if method == "DELETE":
             ensure_delete_allowed(path)
         headers = {
@@ -81,16 +99,24 @@ class DirectTransport:
             "Content-Type": "application/json",
         }
         url = f"{KLAVIYO_BASE}{path}"
-        if method == "GET":
-            resp = requests.get(url, headers=headers, timeout=30)
-        elif method == "POST":
-            resp = requests.post(url, headers=headers, json=body, timeout=30)
-        elif method == "PATCH":
-            resp = requests.patch(url, headers=headers, json=body, timeout=30)
-        elif method == "PUT":
-            resp = requests.put(url, headers=headers, json=body, timeout=30)
-        elif method == "DELETE":
-            resp = requests.delete(url, headers=headers, timeout=30)
-        else:
-            raise AuthError(f"Unsupported HTTP method: {method}")
-        return _check_response(resp)
+        for attempt in range(self.MAX_429_RETRIES + 1):
+            if method == "GET":
+                resp = requests.get(url, headers=headers, timeout=30)
+            elif method == "POST":
+                resp = requests.post(url, headers=headers, json=body, timeout=30)
+            elif method == "PATCH":
+                resp = requests.patch(url, headers=headers, json=body, timeout=30)
+            elif method == "PUT":
+                resp = requests.put(url, headers=headers, json=body, timeout=30)
+            elif method == "DELETE":
+                resp = requests.delete(url, headers=headers, timeout=30)
+            else:
+                raise AuthError(f"Unsupported HTTP method: {method}")
+            if resp.status_code != 429 or attempt == self.MAX_429_RETRIES:
+                return _check_response(resp)
+            try:
+                wait = int(resp.headers.get("Retry-After", "15"))
+            except ValueError:
+                wait = 15
+            time.sleep(wait + 1)
+        raise APIError("Rate limited: exhausted 429 retries")  # unreachable
