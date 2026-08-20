@@ -8,7 +8,7 @@ uvx --from klaviyo-cli klaviyo --help
 
 No install needed. Or install it: `pipx install klaviyo-cli` or `uv tool install klaviyo-cli`. Requires Python 3.11+.
 
-Built and maintained by [BS&Co](https://bsandco.us), a retention marketing agency for eCommerce brands. Read [why we built it and how we made it safe to hand to AI agents](https://bsandco.us/blog-post/klaviyo-cli).
+Built and maintained by [BS&Co](https://bsandco.us), a retention marketing agency for eCommerce brands. Read why we built it and how we made it safe to hand to AI agents: https://bsandco.us/blog-post/klaviyo-cli
 
 > Unofficial. Not affiliated with, endorsed, or supported by Klaviyo, Inc.
 
