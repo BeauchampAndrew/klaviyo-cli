@@ -1,3 +1,4 @@
+import json
 from unittest.mock import patch
 
 from click.testing import CliRunner
@@ -278,3 +279,66 @@ def test_export_events_fields_all_drops_sparse_fieldset(mock_build):
 
     assert result.exit_code == 0, result.output
     assert "fields[event]" not in calls[0][1]
+
+
+def _ev(i, pid=None):
+    return {"id": f"E{i}", "type": "event",
+            "attributes": {"datetime": f"2026-09-1{i}T00:00:00+00:00"},
+            "relationships": {"profile": {"data": {"id": pid or f"P{i}"}}}}
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_events_warns_on_stderr_when_limit_cuts_the_window(mock_build):
+    """--limit silently capped a 3-day pull at ~2.5 days in real use. When more
+    events exist past the limit, say so and show where the returned window starts."""
+    page = {"data": [_ev(7), _ev(6)], "included": [],
+            "links": {"next": "https://a.klaviyo.com/api/events/?page%5Bcursor%5D=MORE"}}
+    ctx_obj, _ = _fake_ctx_factory([page])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["events", "--metric", "M1", "--limit", "2"])
+    assert result.exit_code == 0, result.output
+    assert "--limit" in result.stderr
+    assert "2026-09-16T00:00:00+00:00" in result.stderr
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_events_json_mode_still_warns_on_stderr_not_stdout(mock_build):
+    page = {"data": [_ev(7), _ev(6)], "included": [],
+            "links": {"next": "https://a.klaviyo.com/api/events/?page%5Bcursor%5D=MORE"}}
+    ctx_obj, _ = _fake_ctx_factory([page])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["--json", "events", "--metric", "M1", "--limit", "2"])
+    assert result.exit_code == 0, result.output
+    assert "--limit" in result.stderr
+    json.loads(result.stdout)  # stdout stays valid JSON
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_events_no_warning_when_window_is_exhausted(mock_build):
+    page = {"data": [_ev(7), _ev(6)], "included": [], "links": {"next": None}}
+    ctx_obj, _ = _fake_ctx_factory([page])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["events", "--metric", "M1", "--limit", "10"])
+    assert result.exit_code == 0, result.output
+    assert "WARNING" not in result.stderr
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_events_json_included_profiles_keep_their_ids(mock_build):
+    """included is de-duplicated by profile, so it can't be zipped against data by
+    index (one profile with two events shifts every row after it). Each profile
+    must carry its id so consumers can join on relationships.profile.data.id."""
+    page = {"data": [_ev(7, "PA"), _ev(6, "PB"), _ev(5, "PA")],
+            "included": [
+                {"type": "profile", "id": "PA", "attributes": {"email": "a@example.com"}},
+                {"type": "profile", "id": "PB", "attributes": {"email": "b@example.com"}},
+            ],
+            "links": {"next": None}}
+    ctx_obj, _ = _fake_ctx_factory([page])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["--json", "events", "--metric", "M1", "--limit", "10"])
+    assert result.exit_code == 0, result.output
+    out = json.loads(result.stdout)
+    by_id = {p["id"]: p for p in out["included"]}
+    assert by_id["PA"]["email"] == "a@example.com"
+    assert by_id["PB"]["email"] == "b@example.com"

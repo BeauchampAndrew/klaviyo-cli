@@ -199,10 +199,21 @@ def events(ctx, metric_id, limit, profile_id, since, until, show_properties):
             next_link = data.get("links", {}).get("next")
             path = (next_link.replace("https://a.klaviyo.com", "")
                     if next_link else None)
+        truncated = len(items) > limit or (len(items) == limit and path is not None)
         items = items[:limit]
+        if truncated and items:
+            oldest = (items[-1].get("attributes") or {}).get("datetime", "?")
+            click.echo(
+                f"WARNING: stopped at --limit {limit}; more events exist. Returned "
+                f"window only reaches back to {oldest}. Raise --limit, narrow "
+                f"--since/--until, or use export-events for a complete pull.",
+                err=True)
 
         if use_json:
-            output({"data": items, "included": list(included_all.values())},
+            # Keep each profile's id: included is de-duplicated by profile, so
+            # it can't be lined up with data by index.
+            output({"data": items,
+                    "included": [{"id": pid, **attrs} for pid, attrs in included_all.items()]},
                    use_json=True)
             return
         print(f"Events for metric {metric_id} ({len(items)} shown, newest first):")
