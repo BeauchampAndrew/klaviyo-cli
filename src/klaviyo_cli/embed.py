@@ -39,6 +39,7 @@ from typing import Callable
 import click
 
 from .cli import main
+from .transport import upload_via
 
 
 def wrap_with_account(
@@ -63,13 +64,19 @@ def wrap_with_account(
         ctx = click.get_current_context()
         transport = None
 
-        def call(method, path, body=None, revision=None):
+        def resolved():
             nonlocal transport
             if transport is None:
                 transport = resolver(account)
-            return transport.call(method, path, body=body, revision=revision)
+            return transport
 
-        ctx.obj = {**(ctx.obj or {}), "call": call, "label": account}
+        def call(method, path, body=None, revision=None):
+            return resolved().call(method, path, body=body, revision=revision)
+
+        def upload(path, files, data=None, revision=None):
+            return upload_via(resolved(), path, files, data=data, revision=revision)
+
+        ctx.obj = {**(ctx.obj or {}), "call": call, "upload": upload, "label": account}
         return orig_callback(*args, **kwargs)
 
     return click.Command(

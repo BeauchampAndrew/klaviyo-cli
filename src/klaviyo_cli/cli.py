@@ -5,19 +5,26 @@ from importlib.metadata import entry_points
 import click
 
 from .config import resolve_transport
+from .transport import upload_via
 
 
 def build_context(profile: str | None) -> dict:
     """Build ctx.obj auth pieces. Transport resolves lazily on first call."""
     transport = None
 
-    def call(method, path, body=None, revision=None):
+    def resolved():
         nonlocal transport
         if transport is None:
             transport = resolve_transport(profile)
-        return transport.call(method, path, body=body, revision=revision)
+        return transport
 
-    return {"call": call, "label": profile or "default"}
+    def call(method, path, body=None, revision=None):
+        return resolved().call(method, path, body=body, revision=revision)
+
+    def upload(path, files, data=None, revision=None):
+        return upload_via(resolved(), path, files, data=data, revision=revision)
+
+    return {"call": call, "upload": upload, "label": profile or "default"}
 
 
 @click.group()

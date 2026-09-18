@@ -108,3 +108,40 @@ def test_wrap_with_account_pops_dashed_arg_name():
     help_result = CliRunner().invoke(cmd, ["--help"])
     assert help_result.exit_code == 0
     assert "CLIENT_ID" in help_result.output
+
+
+class FakeUploadTransport(FakeTransport):
+    def __init__(self, account):
+        super().__init__(account)
+        self.uploads = []
+
+    def upload(self, path, files, data=None, revision=None):
+        self.uploads.append((path, files, data))
+        return {"data": {"id": "IMG1", "attributes": {"image_url": "https://cdn.example.com/x.png"}}}
+
+
+def test_wrapped_upload_image_uses_transport_upload(tmp_path):
+    img = tmp_path / "hero.png"
+    img.write_bytes(b"\x89PNG")
+    transports = {}
+
+    def resolver(account):
+        transports[account] = FakeUploadTransport(account)
+        return transports[account]
+
+    result = CliRunner().invoke(build_host_group(resolver), ["upload-image", "acme-co", str(img)])
+    assert result.exit_code == 0, result.output
+    assert transports["acme-co"].uploads[0][0] == "/api/image-upload/"
+    assert "https://cdn.example.com/x.png" in result.output
+
+
+def test_wrapped_upload_on_json_only_transport_is_a_clean_error(tmp_path):
+    """A host transport without upload() (e.g. a JSON-only API proxy) must produce a
+    readable error, not an AttributeError traceback."""
+    img = tmp_path / "hero.png"
+    img.write_bytes(b"\x89PNG")
+    result = CliRunner().invoke(build_host_group(FakeTransport), ["upload-image", "acme-co", str(img)])
+    assert result.exit_code != 0
+    assert "No such command" not in result.output
+    assert "Traceback" not in result.output
+    assert "upload" in result.output.lower()

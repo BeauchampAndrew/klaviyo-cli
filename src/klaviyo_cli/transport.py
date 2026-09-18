@@ -99,19 +99,36 @@ class DirectTransport:
             "Content-Type": "application/json",
         }
         url = f"{KLAVIYO_BASE}{path}"
+        if method == "GET":
+            send = lambda: requests.get(url, headers=headers, timeout=30)  # noqa: E731
+        elif method == "POST":
+            send = lambda: requests.post(url, headers=headers, json=body, timeout=30)  # noqa: E731
+        elif method == "PATCH":
+            send = lambda: requests.patch(url, headers=headers, json=body, timeout=30)  # noqa: E731
+        elif method == "PUT":
+            send = lambda: requests.put(url, headers=headers, json=body, timeout=30)  # noqa: E731
+        elif method == "DELETE":
+            send = lambda: requests.delete(url, headers=headers, timeout=30)  # noqa: E731
+        else:
+            raise AuthError(f"Unsupported HTTP method: {method}")
+        return self._with_429_retry(send)
+
+    def upload(self, path: str, files: dict, data: dict | None = None,
+               revision: str | None = None) -> dict:
+        """Multipart POST (e.g. /api/image-upload/). No JSON Content-Type header:
+        requests has to set the multipart boundary itself."""
+        headers = {
+            "Authorization": f"Klaviyo-API-Key {self.api_key}",
+            "revision": revision or DEFAULT_REVISION,
+        }
+        url = f"{KLAVIYO_BASE}{normalize_path(path)}"
+        return self._with_429_retry(
+            lambda: requests.post(url, headers=headers, files=files, data=data, timeout=60)
+        )
+
+    def _with_429_retry(self, send) -> dict:
         for attempt in range(self.MAX_429_RETRIES + 1):
-            if method == "GET":
-                resp = requests.get(url, headers=headers, timeout=30)
-            elif method == "POST":
-                resp = requests.post(url, headers=headers, json=body, timeout=30)
-            elif method == "PATCH":
-                resp = requests.patch(url, headers=headers, json=body, timeout=30)
-            elif method == "PUT":
-                resp = requests.put(url, headers=headers, json=body, timeout=30)
-            elif method == "DELETE":
-                resp = requests.delete(url, headers=headers, timeout=30)
-            else:
-                raise AuthError(f"Unsupported HTTP method: {method}")
+            resp = send()
             if resp.status_code != 429 or attempt == self.MAX_429_RETRIES:
                 return _check_response(resp)
             try:
@@ -120,3 +137,20 @@ class DirectTransport:
                 wait = 15
             time.sleep(wait + 1)
         raise APIError("Rate limited: exhausted 429 retries")  # unreachable
+
+
+def upload_via(transport, path: str, files: dict, data: dict | None = None,
+               revision: str | None = None) -> dict:
+    """Send a multipart upload through a transport, or explain why it can't.
+
+    Host packages may supply transports that only speak JSON (e.g. an API
+    gateway proxy); those have no upload() and get a readable error instead
+    of an AttributeError.
+    """
+    upload = getattr(transport, "upload", None)
+    if upload is None:
+        raise AuthError(
+            "This account's connection can't send file uploads (it only relays JSON). "
+            "Upload the file in the Klaviyo UI, or use a direct private API key."
+        )
+    return upload(path, files=files, data=data, revision=revision)
