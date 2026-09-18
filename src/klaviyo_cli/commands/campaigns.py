@@ -10,6 +10,32 @@ from .._util import _parse_send_time, _resolve_date_range, output
 from ..cli import main
 from ..transport import APIError, AuthError, KLAVIYO_BASE
 
+def _send_time_label(attrs: dict, unset: str = "not scheduled") -> str:
+    """Scheduled campaigns carry send_time. An unscheduled draft keeps the date
+    set by patch-campaign in send_strategy.datetime (send_time stays null until
+    the campaign is scheduled), so fall back to that and say it's only planned."""
+    if attrs.get("send_time"):
+        return attrs["send_time"]
+    planned = (attrs.get("send_strategy") or {}).get("datetime")
+    if planned:
+        return f"{planned} (planned, not scheduled yet)"
+    return unset
+
+
+def _audience_label(call, audience_id: str) -> str:
+    """'ID (name)' for a segment or list ID. Campaign audiences don't say which
+    type an ID is, so try segments, then lists; keep the bare ID if neither resolves."""
+    for kind in ("segments", "lists"):
+        try:
+            resp = call("GET", f"/api/{kind}/{audience_id}/?fields[{kind[:-1]}]=name")
+        except APIError:
+            continue
+        name = ((resp.get("data") or {}).get("attributes") or {}).get("name")
+        if name:
+            return f"{audience_id} ({name})"
+    return audience_id
+
+
 # ---------------------------------------------------------------------------
 # list-drafts
 # ---------------------------------------------------------------------------
@@ -51,8 +77,10 @@ def list_drafts(ctx):
 
 @main.command("get-campaign")
 @click.argument("campaign_id")
+@click.option("--names", "show_names", is_flag=True,
+              help="Resolve audience IDs to segment/list names (one extra call per ID)")
 @click.pass_context
-def get_campaign(ctx, campaign_id):
+def get_campaign(ctx, campaign_id, show_names):
     """Show details for a specific campaign."""
     use_json = ctx.obj["json"]
     try:
@@ -90,7 +118,10 @@ def get_campaign(ctx, campaign_id):
             print(f"  Status: {attrs.get('status', '?')}")
             print(f"  Subject: {subject or '(none)'}")
             print(f"  Preview: {preview or '(none)'}")
-            print(f"  Send Time: {attrs.get('send_time') or 'not scheduled'}")
+            if show_names:
+                included = [_audience_label(ctx.obj["call"], a) for a in included]
+                excluded = [_audience_label(ctx.obj["call"], a) for a in excluded]
+            print(f"  Send Time: {_send_time_label(attrs)}")
             print(f"  Created: {(attrs.get('created_at') or '').split('T')[0]}")
             print("  Audiences:")
             print(f"    Include: {', '.join(included) or '(none)'}")
@@ -208,7 +239,7 @@ def patch_campaign(ctx, campaign_id, date_val, time_val, include_ids, exclude_id
             name = attrs.get("name")
             if name:
                 print(f"Updated campaign: {name}")
-                print(f"  Send Time: {attrs.get('send_time') or 'not set'}")
+                print(f"  Send Time: {_send_time_label(attrs, unset='not set')}")
             else:
                 print("Campaign updated.")
     except (AuthError, APIError) as e:

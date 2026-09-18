@@ -113,3 +113,109 @@ def test_get_creative_extracts_text_and_greps(mock_build):
     assert "FATHER26" in result.output
     # --grep must drop non-matching lines.
     assert "Footer" not in result.output
+
+
+def _routed_ctx(routes):
+    """Fake ctx whose responses are chosen by path prefix. A route value that is
+    an Exception instance is raised instead of returned (e.g. a 404 APIError)."""
+    calls = []
+
+    def call(method, path, body=None, revision=None):
+        calls.append((method, path, body))
+        for prefix, resp in routes:
+            if path.startswith(prefix):
+                if isinstance(resp, Exception):
+                    raise resp
+                return resp
+        raise AssertionError(f"unexpected call {method} {path}")
+
+    return {"call": call, "label": "test-account"}, calls
+
+
+def _campaign_page(send_time=None, strategy=None, included=("SEGA",), excluded=()):
+    return {
+        "data": {
+            "id": "CAMP1",
+            "attributes": {
+                "name": "[09-20-2026] Trial Offer",
+                "status": "Draft" if not send_time else "Scheduled",
+                "send_time": send_time,
+                "audiences": {"included": list(included), "excluded": list(excluded)},
+                "send_strategy": strategy or {"method": "static"},
+            },
+        },
+        "included": [],
+    }
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_get_campaign_shows_planned_send_time_on_unscheduled_draft(mock_build):
+    """A draft with a date set via patch-campaign keeps it in send_strategy.datetime
+    while send_time stays null until scheduled. Printing 'not scheduled' hid a real,
+    correct date and sent us chasing a non-problem."""
+    page = _campaign_page(strategy={"method": "static", "datetime": "2026-09-20T14:00:00+00:00"})
+    ctx_obj, _ = _fake_ctx_factory([page])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["get-campaign", "CAMP1"])
+    assert result.exit_code == 0, result.output
+    assert "2026-09-20T14:00:00+00:00" in result.output
+    assert "planned" in result.output
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_get_campaign_without_any_date_still_says_not_scheduled(mock_build):
+    ctx_obj, _ = _fake_ctx_factory([_campaign_page()])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["get-campaign", "CAMP1"])
+    assert result.exit_code == 0, result.output
+    assert "Send Time: not scheduled" in result.output
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_get_campaign_names_flag_resolves_segment_and_list_names(mock_build):
+    """--names prints each audience ID with its name. IDs can be segments or lists;
+    a 404 on the segment lookup falls through to the list lookup."""
+    from klaviyo_cli.transport import APIError
+    ctx_obj, calls = _routed_ctx([
+        ("/api/campaigns/CAMP1/", _campaign_page(included=("SEGA", "LIST1"), excluded=("SEGB",))),
+        ("/api/segments/SEGA/", {"data": {"attributes": {"name": "Engaged 0-30d"}}}),
+        ("/api/segments/SEGB/", {"data": {"attributes": {"name": "Standard Unengaged"}}}),
+        ("/api/segments/LIST1/", APIError("HTTP 404")),
+        ("/api/lists/LIST1/", {"data": {"attributes": {"name": "SEED LIST"}}}),
+    ])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["get-campaign", "CAMP1", "--names"])
+    assert result.exit_code == 0, result.output
+    assert "SEGA (Engaged 0-30d)" in result.output
+    assert "LIST1 (SEED LIST)" in result.output
+    assert "SEGB (Standard Unengaged)" in result.output
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_get_campaign_names_flag_keeps_bare_id_when_lookup_fails(mock_build):
+    from klaviyo_cli.transport import APIError
+    ctx_obj, _ = _routed_ctx([
+        ("/api/campaigns/CAMP1/", _campaign_page(included=("GONE1",))),
+        ("/api/segments/GONE1/", APIError("HTTP 404")),
+        ("/api/lists/GONE1/", APIError("HTTP 404")),
+    ])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["get-campaign", "CAMP1", "--names"])
+    assert result.exit_code == 0, result.output
+    assert "Include: GONE1" in result.output
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_patch_campaign_reports_planned_send_time(mock_build):
+    """patch-campaign used to print 'Send Time: not set' right after setting a date,
+    because the date lives in send_strategy until the campaign is scheduled."""
+    resp = {"data": {"id": "CAMP1", "attributes": {
+        "name": "[09-20-2026] Trial Offer", "send_time": None,
+        "send_strategy": {"method": "static", "datetime": "2026-09-20T14:00:00+00:00"}}}}
+    ctx_obj, _ = _fake_ctx_factory([resp])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["patch-campaign", "CAMP1", "--date", "09-20-2026",
+                                       "--time", "10:00 AM EDT"])
+    assert result.exit_code == 0, result.output
+    assert "not set" not in result.output
+    assert "2026-09-20T14:00:00+00:00" in result.output
