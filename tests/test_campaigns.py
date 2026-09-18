@@ -288,3 +288,54 @@ def test_patch_message_multi_message_campaign_needs_message_id(mock_build):
     result = CliRunner().invoke(main, ["patch-message", "CAMP1", "--subject", "X"])
     assert result.exit_code != 0
     assert "--message-id" in result.output
+
+
+def _clone_resp():
+    return {"data": {"id": "NEW1", "type": "campaign", "attributes": {
+        "name": "[04-10-2026] Spring Sale", "status": "Draft",
+        "audiences": {"included": ["SEGA", "SEED"], "excluded": ["SEGX"]}}}}
+
+
+def _clone_msgs():
+    return {"data": [{"id": "MSGNEW", "type": "campaign-message",
+                      "attributes": {"definition": {"content": {
+                          "subject": "Spring sale starts today",
+                          "from_email": "support@example.com"}}},
+                      "relationships": {"template": {"data": {"id": "TPLNEW"}}}}]}
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_clone_campaign_posts_clone_request(mock_build):
+    ctx_obj, calls = _fake_ctx_factory([_clone_resp(), _clone_msgs()])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["clone-campaign", "SRC1", "--name", "[04-10-2026] Spring Sale"])
+    assert result.exit_code == 0, result.output
+    method, path, body = calls[0]
+    assert (method, path) == ("POST", "/api/campaign-clone/")
+    assert body["data"]["type"] == "campaign"
+    assert body["data"]["id"] == "SRC1"
+    assert body["data"]["attributes"]["new_name"] == "[04-10-2026] Spring Sale"
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_clone_campaign_surfaces_ids_and_inherited_settings(mock_build):
+    """Everything a clone silently inherits (subject, from address, audiences) has to
+    be on screen, plus the ids the next steps need and the template caveat."""
+    ctx_obj, _ = _fake_ctx_factory([_clone_resp(), _clone_msgs()])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["clone-campaign", "SRC1", "--name", "[04-10-2026] Spring Sale"])
+    assert result.exit_code == 0, result.output
+    out = result.output
+    for expected in ("NEW1", "MSGNEW", "TPLNEW", "Spring sale starts today",
+                     "support@example.com", "SEGA", "SEGX", "set-campaign-html"):
+        assert expected in out, expected
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_clone_campaign_requires_name(mock_build):
+    ctx_obj, calls = _fake_ctx_factory([])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["clone-campaign", "SRC1"])
+    assert result.exit_code != 0
+    assert "--name" in result.output
+    assert calls == []

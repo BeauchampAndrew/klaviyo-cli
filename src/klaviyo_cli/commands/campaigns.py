@@ -541,6 +541,56 @@ def get_creative(ctx, campaign_id, show_html, grep_term):
 
 
 # ---------------------------------------------------------------------------
+# clone-campaign
+# ---------------------------------------------------------------------------
+
+
+@main.command("clone-campaign")
+@click.argument("campaign_id")
+@click.option("--name", "new_name", required=True, help="Name for the new draft")
+@click.pass_context
+def clone_campaign(ctx, campaign_id, new_name):
+    """Duplicate a campaign into a new draft and show what it inherited.
+
+    A clone carries the source's subject line, from address, and audiences
+    along with the creative -- only the name changes. All three are printed so
+    they can be checked against the plan. The clone's template is
+    campaign-scoped (PATCH /api/templates/ on it fails), so edit the creative
+    with set-campaign-html.
+    """
+    use_json = ctx.obj["json"]
+    try:
+        call = ctx.obj["call"]
+        payload = {"data": {"type": "campaign", "id": campaign_id,
+                            "attributes": {"new_name": new_name}}}
+        created = call("POST", "/api/campaign-clone/", body=payload).get("data") or {}
+        new_id = created.get("id")
+        attrs = created.get("attributes") or {}
+        msgs = call("GET", f"/api/campaigns/{new_id}/campaign-messages/").get("data", [])
+
+        if use_json:
+            output({"campaign": created, "messages": msgs}, use_json=True)
+            return
+        audiences = attrs.get("audiences") or {}
+        print(f"Cloned {campaign_id} -> {new_id}")
+        print(f"  Name: {attrs.get('name', new_name)}")
+        print(f"  Status: {attrs.get('status', '?')}")
+        print("  Inherited from the source (check against the plan):")
+        print(f"    Include: {', '.join(audiences.get('included') or []) or '(none)'}")
+        print(f"    Exclude: {', '.join(audiences.get('excluded') or []) or '(none)'}")
+        for m in msgs:
+            content = ((m.get("attributes") or {}).get("definition") or {}).get("content") or {}
+            tpl = (((m.get("relationships") or {}).get("template") or {}).get("data") or {}).get("id")
+            print(f"    Message {m.get('id')}: template {tpl or '(none)'}")
+            print(f"      Subject: {content.get('subject') or '(none)'}")
+            print(f"      From: {content.get('from_email') or '(none)'}")
+        print("  Edit the creative with set-campaign-html; the cloned template is "
+              "campaign-scoped and rejects direct template PATCHes.")
+    except (AuthError, APIError) as e:
+        raise click.ClickException(str(e))
+
+
+# ---------------------------------------------------------------------------
 # patch-message
 # ---------------------------------------------------------------------------
 
