@@ -54,10 +54,13 @@ Run `klaviyo COMMAND --help` for full options on any command.
 |---|---|
 | `list-campaigns` | List/filter campaigns by status, channel, and date (beyond name search) |
 | `search-campaigns` | Search campaigns by name |
-| `get-campaign` | Show details for a specific campaign |
+| `get-campaign` | Show details for a specific campaign, incl. subject/preview and planned send time; `--names` resolves audience IDs |
 | `get-creative` | Dump a campaign's creative (subject + text/HTML) via its template |
 | `list-drafts` | List draft email campaigns for a client |
 | `patch-campaign` | Update campaign send time and/or audiences |
+| `patch-message` | Change subject, preview text or sender without dropping the other fields (Klaviyo replaces the whole content object); verifies after |
+| `clone-campaign` | Duplicate a campaign into a new draft and print what it inherited (subject, from address, audiences) plus message/template ids |
+| `set-campaign-html` | Replace a campaign's HTML from a file and verify the live creative (`--expect`/`--forbid` text checks) |
 | `schedule` | Schedule a campaign for sending |
 | `campaign-performance` | Show campaign revenue and engagement metrics |
 | `metrics` | Show sent campaigns for a client within a date window |
@@ -70,6 +73,7 @@ Run `klaviyo COMMAND --help` for full options on any command.
 | `get-segment` | Show a segment's definition (conditions, metric IDs resolved) + count |
 | `segment-count` | Get profile count for a single segment (rate limited: 1/s, 15/min) |
 | `segment-sizes` | Show all segments with profile counts |
+| `list-sizes` | Show all lists with profile counts, newest first |
 | `create-segment` | Create a segment from a definition, guarding against duplicates |
 
 ### Flows
@@ -97,7 +101,7 @@ Run `klaviyo COMMAND --help` for full options on any command.
 | Command | Description |
 |---|---|
 | `push-event` | Push a custom event to a profile by email (creates the profile if needed) |
-| `events` | List recent events for a metric ID; `--since/--until` windows, `--properties` payloads |
+| `events` | List recent events for a metric ID; `--since/--until` windows, `--properties` payloads; warns when `--limit` cuts the window |
 | `export-events` | Bulk-export ALL events for a metric in a window as NDJSON (exhaustive pagination; `--out` file, `--fields`, `--max-pages` guard) |
 
 ### Metrics
@@ -113,12 +117,17 @@ Run `klaviyo COMMAND --help` for full options on any command.
 |---|---|
 | `upload-sms` | Create an SMS campaign draft in Klaviyo |
 
+### Images
+| Command | Description |
+|---|---|
+| `upload-image` | Upload a local image to the image library and print its hosted URL (multipart; needs a direct API key) |
+
 ### Raw API
 | Command | Description |
 |---|---|
 | `api` | Raw API pass-through: `klaviyo api <METHOD> <path>` |
 
-That's 32 commands total.
+That's 42 commands total.
 
 ## Multi-account profiles
 
