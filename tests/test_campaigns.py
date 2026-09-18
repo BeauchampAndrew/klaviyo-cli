@@ -219,3 +219,72 @@ def test_patch_campaign_reports_planned_send_time(mock_build):
     assert result.exit_code == 0, result.output
     assert "not set" not in result.output
     assert "2026-09-20T14:00:00+00:00" in result.output
+
+
+def _msg(subject="Spring sale starts today", mid="MSG1", channel="email", label="[04-10] Spring sale"):
+    return {"id": mid, "type": "campaign-message", "attributes": {
+        "channel": channel,
+        "definition": {"channel": channel, "label": label, "content": {
+            "subject": subject, "preview_text": "",
+            "from_email": "support@example.com", "from_label": "Example",
+            "reply_to_email": None, "cc_email": None, "bcc_email": None}}}}
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_patch_message_merges_subject_and_preserves_from_email(mock_build):
+    """Klaviyo replaces definition.content wholesale and requires channel + label.
+    A subject-only PATCH that omits from_email drops the from address, so the
+    command must send back every existing (non-null) field with the change merged in."""
+    ctx_obj, calls = _fake_ctx_factory([
+        {"data": [_msg()]},                                   # GET campaign messages
+        {"data": _msg(subject="Last day of the spring sale")},       # PATCH response
+        {"data": _msg(subject="Last day of the spring sale")},       # verify GET
+    ])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["patch-message", "CAMP1", "--subject", "Last day of the spring sale"])
+    assert result.exit_code == 0, result.output
+    method, path, body = calls[1]
+    assert (method, path) == ("PATCH", "/api/campaign-messages/MSG1/")
+    definition = body["data"]["attributes"]["definition"]
+    assert definition["channel"] == "email"
+    assert definition["label"] == "[04-10] Spring sale"
+    content = definition["content"]
+    assert content["subject"] == "Last day of the spring sale"
+    assert content["from_email"] == "support@example.com"
+    assert content["from_label"] == "Example"
+    assert None not in content.values()
+    assert "Spring sale starts today" in result.output
+    assert "Last day of the spring sale" in result.output
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_patch_message_fails_loudly_when_change_did_not_stick(mock_build):
+    """A 2xx is not proof. Re-read the message and fail if the subject didn't change."""
+    ctx_obj, _ = _fake_ctx_factory([
+        {"data": [_msg()]},
+        {"data": _msg(subject="Last day of the spring sale")},
+        {"data": _msg()},                                     # verify GET: still old
+    ])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["patch-message", "CAMP1", "--subject", "Last day of the spring sale"])
+    assert result.exit_code != 0
+    assert "subject" in result.output.lower()
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_patch_message_requires_at_least_one_field(mock_build):
+    ctx_obj, calls = _fake_ctx_factory([])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["patch-message", "CAMP1"])
+    assert result.exit_code != 0
+    assert "--subject" in result.output
+    assert calls == []
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_patch_message_multi_message_campaign_needs_message_id(mock_build):
+    ctx_obj, _ = _fake_ctx_factory([{"data": [_msg(mid="MSG1"), _msg(mid="MSG2")]}])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["patch-message", "CAMP1", "--subject", "X"])
+    assert result.exit_code != 0
+    assert "--message-id" in result.output

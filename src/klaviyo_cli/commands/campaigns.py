@@ -541,6 +541,106 @@ def get_creative(ctx, campaign_id, show_html, grep_term):
 
 
 # ---------------------------------------------------------------------------
+# patch-message
+# ---------------------------------------------------------------------------
+
+
+def _pick_message(call, campaign_id: str, message_id: str | None = None) -> dict:
+    """The campaign's only message, or the one matching message_id."""
+    msgs = call("GET", f"/api/campaigns/{campaign_id}/campaign-messages/").get("data", [])
+    if message_id:
+        for m in msgs:
+            if m.get("id") == message_id:
+                return m
+        raise click.ClickException(f"Message {message_id} not found on campaign {campaign_id}.")
+    if not msgs:
+        raise click.ClickException(f"Campaign {campaign_id} has no messages.")
+    if len(msgs) > 1:
+        ids = ", ".join(m.get("id", "?") for m in msgs)
+        raise click.ClickException(
+            f"Campaign {campaign_id} has {len(msgs)} messages ({ids}); pass --message-id."
+        )
+    return msgs[0]
+
+
+@main.command("patch-message")
+@click.argument("campaign_id")
+@click.option("--subject", default=None, help="Subject line")
+@click.option("--preview", default=None, help="Preview text")
+@click.option("--from-email", default=None, help="From address")
+@click.option("--from-label", default=None, help="From name")
+@click.option("--reply-to", default=None, help="Reply-to address")
+@click.option("--message-id", default=None, help="Which message, if the campaign has more than one")
+@click.pass_context
+def patch_message(ctx, campaign_id, subject, preview, from_email, from_label, reply_to, message_id):
+    """Change an email campaign's subject, preview text, or sender, keeping every other field.
+
+    Klaviyo replaces the message's whole content object on PATCH (and requires
+    channel + label), so a subject-only update that omits from_email silently
+    drops the from address. This reads the current content, merges your changes
+    in, sends it all back, then re-reads the message and fails if anything
+    didn't stick or changed that you didn't ask for.
+    """
+    use_json = ctx.obj["json"]
+    changes = {k: v for k, v in {
+        "subject": subject, "preview_text": preview, "from_email": from_email,
+        "from_label": from_label, "reply_to_email": reply_to,
+    }.items() if v is not None}
+    if not changes:
+        raise click.UsageError(
+            "Provide at least one of: --subject, --preview, --from-email, --from-label, --reply-to"
+        )
+    try:
+        call = ctx.obj["call"]
+        msg = _pick_message(call, campaign_id, message_id)
+        mid = msg["id"]
+        attrs = msg.get("attributes") or {}
+        definition = attrs.get("definition") or {}
+        channel = definition.get("channel") or attrs.get("channel")
+        if channel != "email":
+            raise click.ClickException(
+                f"Message {mid} is {channel or 'an unknown channel'}; patch-message handles email only."
+            )
+        before = definition.get("content") or {}
+        content = {k: v for k, v in before.items() if v is not None}
+        content.update(changes)
+        payload = {"data": {"type": "campaign-message", "id": mid, "attributes": {"definition": {
+            "channel": channel,
+            "label": definition.get("label") or attrs.get("label"),
+            "content": content,
+        }}}}
+        call("PATCH", f"/api/campaign-messages/{mid}/", body=payload)
+
+        # A 2xx isn't proof: re-read and compare.
+        fresh = (call("GET", f"/api/campaign-messages/{mid}/").get("data") or {}).get("attributes") or {}
+        after = (fresh.get("definition") or {}).get("content") or {}
+        not_applied = [k for k, v in changes.items() if after.get(k) != v]
+        if not_applied:
+            raise click.ClickException(
+                "Klaviyo accepted the update but the message still shows the old "
+                f"{', '.join(not_applied)}. Check the campaign in the Klaviyo UI."
+            )
+        collateral = [k for k, v in content.items() if k not in changes and after.get(k) != v]
+        if collateral:
+            raise click.ClickException(
+                f"The update changed fields you didn't ask to change: {', '.join(collateral)}. "
+                "Check the campaign in the Klaviyo UI."
+            )
+
+        if use_json:
+            output({"campaign_id": campaign_id, "message_id": mid,
+                    "before": before, "after": after}, use_json=True)
+        else:
+            print(f"Updated message {mid} on campaign {campaign_id} (verified):")
+            for k in changes:
+                print(f"  {k}: {before.get(k)!r} -> {after.get(k)!r}")
+            if "from_email" not in changes:
+                print(f"  from_email unchanged: {after.get('from_email')}")
+    except (AuthError, APIError) as e:
+        raise click.ClickException(str(e))
+
+
+# ---------------------------------------------------------------------------
 # list-campaigns
 # ---------------------------------------------------------------------------
 
