@@ -1,5 +1,6 @@
 """Campaign commands: list, search, patch, schedule, creative, performance."""
 
+import re
 import urllib.parse
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -686,6 +687,97 @@ def patch_message(ctx, campaign_id, subject, preview, from_email, from_label, re
                 print(f"  {k}: {before.get(k)!r} -> {after.get(k)!r}")
             if "from_email" not in changes:
                 print(f"  from_email unchanged: {after.get('from_email')}")
+    except (AuthError, APIError) as e:
+        raise click.ClickException(str(e))
+
+
+# ---------------------------------------------------------------------------
+# set-campaign-html
+# ---------------------------------------------------------------------------
+
+_IMG_SRC = re.compile(r'<img[^>]*\ssrc="([^"]+)"', re.IGNORECASE)
+
+
+def _template_id(message: dict) -> str | None:
+    return (((message.get("relationships") or {}).get("template") or {}).get("data") or {}).get("id")
+
+
+@main.command("set-campaign-html")
+@click.argument("campaign_id")
+@click.option("--html", "html_path", required=True, type=click.Path(exists=True, dir_okay=False),
+              help="HTML file to use as the campaign's creative")
+@click.option("--expect", multiple=True,
+              help="Text that must appear in the live creative afterwards (repeatable)")
+@click.option("--forbid", multiple=True,
+              help="Text that must NOT appear in the live creative afterwards (repeatable)")
+@click.option("--message-id", default=None, help="Which message, if the campaign has more than one")
+@click.option("--keep-template", is_flag=True,
+              help="Keep the intermediate library template instead of deleting it")
+@click.pass_context
+def set_campaign_html(ctx, campaign_id, html_path, expect, forbid, message_id, keep_template):
+    """Replace an email campaign's HTML creative and verify it took.
+
+    Assigning a template to a campaign message copies its HTML into the
+    message, so later edits to that template never reach the campaign, and a
+    cloned campaign's own template rejects PATCH. This creates a throwaway
+    library template from the file, assigns it, re-reads the live creative and
+    checks it (every <img> URL from the file must be there, plus any --expect /
+    --forbid text), then deletes the throwaway unless --keep-template.
+    """
+    use_json = ctx.obj["json"]
+    with open(html_path, encoding="utf-8") as fh:
+        html = fh.read()
+    try:
+        call = ctx.obj["call"]
+        msg = _pick_message(call, campaign_id, message_id)
+        mid = msg["id"]
+        old_tpl = _template_id(msg)
+
+        created = call("POST", "/api/templates/", body={"data": {"type": "template", "attributes": {
+            "name": f"klaviyo-cli set-campaign-html {campaign_id}",
+            "editor_type": "CODE",
+            "html": html,
+        }}})
+        tmp_id = (created.get("data") or {}).get("id")
+        call("POST", "/api/campaign-message-assign-template/", body={"data": {
+            "type": "campaign-message", "id": mid,
+            "relationships": {"template": {"data": {"type": "template", "id": tmp_id}}},
+        }})
+
+        live_tpl = _template_id(_pick_message(call, campaign_id, mid))
+        live_html = ((call("GET", f"/api/templates/{live_tpl}/").get("data") or {})
+                     .get("attributes") or {}).get("html") or ""
+
+        images = _IMG_SRC.findall(html)
+        problems = []
+        if live_tpl == old_tpl:
+            problems.append(f"message still points at its old template {old_tpl}")
+        missing = [u for u in images if u not in live_html]
+        if missing:
+            problems.append("image URLs from your file are missing from the live creative: "
+                            + ", ".join(missing))
+        problems += [f"expected text not found: {t!r}" for t in expect if t not in live_html]
+        problems += [f"forbidden text still present: {t!r}" for t in forbid if t in live_html]
+
+        if tmp_id and not keep_template:
+            call("DELETE", f"/api/templates/{tmp_id}/")
+        if problems:
+            raise click.ClickException("Creative did not verify:\n  " + "\n  ".join(problems))
+
+        if use_json:
+            output({"campaign_id": campaign_id, "message_id": mid, "live_template_id": live_tpl,
+                    "intermediate_template_id": tmp_id, "kept_intermediate": keep_template,
+                    "checked": {"images": len(images), "expect": list(expect),
+                                "forbid": list(forbid)}}, use_json=True)
+        else:
+            print(f"Creative replaced on campaign {campaign_id}, message {mid} (verified).")
+            print(f"  Live template: {live_tpl}")
+            print(f"  Checked: {len(images)} image URL(s), {len(expect)} --expect, "
+                  f"{len(forbid)} --forbid")
+            if keep_template:
+                print(f"  Kept intermediate template {tmp_id}")
+            else:
+                print(f"  Removed intermediate template {tmp_id}")
     except (AuthError, APIError) as e:
         raise click.ClickException(str(e))
 

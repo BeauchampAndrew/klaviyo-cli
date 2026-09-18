@@ -339,3 +339,95 @@ def test_clone_campaign_requires_name(mock_build):
     assert result.exit_code != 0
     assert "--name" in result.output
     assert calls == []
+
+
+NEW_HTML = ('<html><body><img src="https://cdn.example.com/hero-v2.png">'
+            '<a href="https://example.com/sale">Shop The Sale</a></body></html>')
+
+
+def _msgs_with_template(tid):
+    return {"data": [{"id": "MSG1", "type": "campaign-message",
+                      "attributes": {"definition": {"channel": "email", "content": {}}},
+                      "relationships": {"template": {"data": {"id": tid}}}}]}
+
+
+def _html_file(tmp_path, html=NEW_HTML):
+    f = tmp_path / "email.html"
+    f.write_text(html)
+    return str(f)
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_set_campaign_html_creates_assigns_verifies_and_cleans_up(mock_build, tmp_path):
+    """Assigning a template snapshots its HTML into the message (Klaviyo copies it),
+    so the reliable path is: create a throwaway library template, assign it, verify
+    the live creative, then delete the throwaway."""
+    ctx_obj, calls = _fake_ctx_factory([
+        _msgs_with_template("TOLD"),                                   # current message
+        {"data": {"id": "TTMP", "type": "template"}},                  # POST /api/templates/
+        {"data": {"id": "MSG1"}},                                      # assign
+        _msgs_with_template("TLIVE"),                                  # re-read message
+        {"data": {"attributes": {"html": "<head>tracking</head>" + NEW_HTML}}},  # live template
+        {},                                                            # DELETE throwaway
+    ])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["set-campaign-html", "CAMP1", "--html", _html_file(tmp_path)])
+    assert result.exit_code == 0, result.output
+    method, path, body = calls[1]
+    assert (method, path) == ("POST", "/api/templates/")
+    assert body["data"]["attributes"]["html"] == NEW_HTML
+    assert body["data"]["attributes"]["editor_type"] == "CODE"
+    method, path, body = calls[2]
+    assert (method, path) == ("POST", "/api/campaign-message-assign-template/")
+    assert body["data"]["id"] == "MSG1"
+    assert body["data"]["relationships"]["template"]["data"]["id"] == "TTMP"
+    assert calls[-1][:2] == ("DELETE", "/api/templates/TTMP/")
+    assert "verified" in result.output.lower()
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_set_campaign_html_fails_when_live_creative_is_stale(mock_build, tmp_path):
+    """If the message still serves the old creative (e.g. the new image URL isn't in
+    the live HTML), say so instead of reporting success."""
+    ctx_obj, _ = _fake_ctx_factory([
+        _msgs_with_template("TOLD"),
+        {"data": {"id": "TTMP"}},
+        {"data": {"id": "MSG1"}},
+        _msgs_with_template("TLIVE"),
+        {"data": {"attributes": {"html": '<img src="https://cdn.example.com/hero-OLD.png">'}}},
+        {},
+    ])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["set-campaign-html", "CAMP1", "--html", _html_file(tmp_path)])
+    assert result.exit_code != 0
+    assert "hero-v2.png" in result.output
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_set_campaign_html_expect_and_forbid_checks(mock_build, tmp_path):
+    """--expect / --forbid assert copy on the live creative, e.g. after a copy rewrite:
+    'Shop The Sale' present, 'Shop Now' gone."""
+    live = NEW_HTML.replace("</body>", "<p>Shop Now</p></body>")
+    ctx_obj, _ = _fake_ctx_factory([
+        _msgs_with_template("TOLD"), {"data": {"id": "TTMP"}}, {"data": {"id": "MSG1"}},
+        _msgs_with_template("TLIVE"), {"data": {"attributes": {"html": live}}}, {},
+    ])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["set-campaign-html", "CAMP1", "--html", _html_file(tmp_path),
+                                       "--expect", "Shop The Sale", "--forbid", "Shop Now"])
+    assert result.exit_code != 0
+    assert "Shop Now" in result.output
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_set_campaign_html_keep_template_skips_delete(mock_build, tmp_path):
+    ctx_obj, calls = _fake_ctx_factory([
+        _msgs_with_template("TOLD"), {"data": {"id": "TTMP"}}, {"data": {"id": "MSG1"}},
+        _msgs_with_template("TLIVE"), {"data": {"attributes": {"html": NEW_HTML}}},
+    ])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["set-campaign-html", "CAMP1", "--html", _html_file(tmp_path),
+                                       "--keep-template"])
+    assert result.exit_code == 0, result.output
+    assert all(c[0] != "DELETE" for c in calls)
+    assert "TTMP" in result.output
