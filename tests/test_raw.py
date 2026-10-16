@@ -26,4 +26,4 @@ def test_api_passthrough_delete_blocked(mock_build):
         "call": DirectTransport("pk_x").call, "label": "t"}
     result = CliRunner().invoke(main, ["api", "DELETE", "/api/segments/X/"])
     assert result.exit_code != 0
-    assert "not allowed" in result.output
+    assert "klaviyo delete" in result.output

@@ -12,7 +12,7 @@ def test_delete_template_allowed():
 
 
 def test_delete_campaign_blocked():
-    with pytest.raises(AuthError, match="not allowed"):
+    with pytest.raises(AuthError, match="not allowed here"):
         ensure_delete_allowed("/api/campaigns/AbC123/")
 
 

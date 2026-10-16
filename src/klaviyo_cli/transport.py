@@ -2,6 +2,8 @@
 
 import re
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 import requests
 
@@ -18,26 +20,42 @@ class AuthError(Exception):
 
 
 # DELETE is gated to an allowlist of paths we have intentionally vetted as safe.
-# DO NOT add catalog-deletion endpoints lightly: deleting a profile, list,
-# segment, or campaign in Klaviyo is destructive and often irreversible from
-# the API. To add a new entry, treat it like a security review — confirm the
-# operation cannot cascade into losing subscribers, sent-campaign history, or
-# flow definitions, and that the user is asking to delete the specific object,
-# not its contents.
+# Templates are always deletable. Segments, lists, campaigns, and flows can
+# only be deleted through the `delete` command, which names the object and
+# requires its ID typed back (or passed via --confirm) before it runs. The raw
+# `api` passthrough never reaches them.
 DELETE_ALLOWED_PATHS = [
     re.compile(r"^/api/templates/[A-Za-z0-9_-]+/?$"),
 ]
 
+CONFIRMABLE_DELETE_PATHS = re.compile(
+    r"^/api/(segments|lists|campaigns|flows)/([A-Za-z0-9_-]+)/?$"
+)
+
+_confirmed_delete: ContextVar[str | None] = ContextVar("_confirmed_delete", default=None)
+
+
+@contextmanager
+def confirmed_delete(path: str):
+    """Allow exactly one CONFIRMABLE_DELETE_PATHS path for the enclosed calls.
+    Only the `delete` command opens this, after the user confirmed the ID."""
+    token = _confirmed_delete.set(normalize_path(path))
+    try:
+        yield
+    finally:
+        _confirmed_delete.reset(token)
+
 
 def ensure_delete_allowed(path: str) -> None:
-    if not any(p.match(path) for p in DELETE_ALLOWED_PATHS):
-        raise AuthError(
-            f"DELETE on {path} is not allowed. Klaviyo's destructive-API "
-            "operations (profiles, lists, segments, campaigns, flows) are "
-            "blocked at the CLI level to prevent accidental data loss. "
-            "If this delete is intentional and safe, add a pattern to "
-            "DELETE_ALLOWED_PATHS in klaviyo_cli/transport.py."
-        )
+    if any(p.match(path) for p in DELETE_ALLOWED_PATHS):
+        return
+    if CONFIRMABLE_DELETE_PATHS.match(path) and _confirmed_delete.get() == path:
+        return
+    raise AuthError(
+        f"DELETE on {path} is not allowed here. Delete segments, lists, "
+        "campaigns, and flows with `klaviyo delete <type> <id>`, which asks "
+        "for explicit confirmation."
+    )
 
 
 def normalize_path(path: str) -> str:

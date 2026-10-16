@@ -33,7 +33,7 @@ klaviyo account-health
 klaviyo --json list-campaigns --days 30
 ```
 
-Destructive Klaviyo operations are blocked at the CLI level. Klaviyo's DELETE endpoints for profiles, lists, segments, campaigns, and flows are not reachable through this tool, even via the raw `api` passthrough. Only template deletion is allowlisted (`transport.py`, `DELETE_ALLOWED_PATHS`). This is why it's safe to hand `klaviyo-cli` to an agent with a live API key: the agent can read anything and change campaign content, timing, and audiences, but it cannot delete subscriber data, segments, or send history. Two commands can stop mail going to real people, and both require an explicit `--yes` flag or an interactive confirmation before they run: `suppress` (reversible — `unsuppress` undoes it) and `unsubscribe` (it revokes consent, which `unsuppress` cannot undo; reversing it takes a deliberate call to Klaviyo's bulk subscribe endpoint asserting fresh consent, which this CLI intentionally does not wrap).
+Deletes are gated. The raw `api` passthrough can only delete templates (`transport.py`, `DELETE_ALLOWED_PATHS`). Segments, lists, campaigns, and flows can only be deleted with `klaviyo delete <type> <id>`, which prints what it is about to remove (profile count, status, and for segments and lists every flow and draft/scheduled campaign still using it), then requires the ID typed back, or `--confirm <id>` in a non-interactive shell. Without that confirmation nothing is deleted. Profiles cannot be deleted through this tool. Two commands can stop mail going to real people, and both require an explicit `--yes` flag or an interactive confirmation before they run: `suppress` (reversible — `unsuppress` undoes it) and `unsubscribe` (it revokes consent, which `unsuppress` cannot undo; reversing it takes a deliberate call to Klaviyo's bulk subscribe endpoint asserting fresh consent, which this CLI intentionally does not wrap).
 
 Drop this in your repo's `CLAUDE.md` so an agent knows the tool exists:
 
@@ -122,12 +122,17 @@ Run `klaviyo COMMAND --help` for full options on any command.
 |---|---|
 | `upload-image` | Upload a local image to the image library and print its hosted URL (multipart; needs a direct API key) |
 
+### Delete
+| Command | Description |
+|---|---|
+| `delete` | Permanently delete a segment, list, campaign, or flow: `klaviyo delete <type> <id>`. Shows what uses it first, then requires the ID typed back or `--confirm <id>` |
+
 ### Raw API
 | Command | Description |
 |---|---|
 | `api` | Raw API pass-through: `klaviyo api <METHOD> <path>` |
 
-That's 42 commands total.
+That's 43 commands total.
 
 ## Multi-account profiles
 
