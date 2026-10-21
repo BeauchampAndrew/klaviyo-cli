@@ -74,7 +74,8 @@ def _blocks(version):
 
 def _block_text(block):
     props = block.get("properties") or {}
-    parts = [_plain(props.get(k)) for k in ("content", "label", "placeholder") if props.get(k)]
+    # Not every block's content is text: sms_disclosure holds a settings object.
+    parts = [_plain(props[k]) for k in ("content", "label", "placeholder") if isinstance(props.get(k), str)]
     return " | ".join(p for p in parts if p)
 
 

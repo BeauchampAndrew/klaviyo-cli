@@ -53,6 +53,20 @@ def test_form_shows_blocks_and_live_status(mock_build):
 
 
 @patch("klaviyo_cli.cli.build_context")
+def test_form_handles_non_text_block_content(mock_build):
+    form = _form()
+    blocks = form["data"]["attributes"]["definition"]["versions"][0]["steps"][0]["columns"][0]["rows"][0]["blocks"]
+    blocks.append({"id": "B3", "type": "sms_disclosure", "properties": {"content": {"type": "custom"}}})
+    ctx_obj, _ = _fake_ctx_factory([form])
+    mock_build.return_value = ctx_obj
+
+    result = CliRunner().invoke(main, ["form", "AbC123"])
+
+    assert result.exit_code == 0, result.output
+    assert "sms_disclosure" in result.output
+
+
+@patch("klaviyo_cli.cli.build_context")
 def test_form_warns_when_no_draft(mock_build):
     ctx_obj, _ = _fake_ctx_factory([_form(with_draft=False)])
     mock_build.return_value = ctx_obj
