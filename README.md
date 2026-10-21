@@ -116,6 +116,14 @@ Run `klaviyo COMMAND --help` for full options on any command.
 ### Forms
 Uses Forms API revision `2026-10-15` (needs `forms:read`, plus `forms:write` to edit). The API only edits **draft** versions: live versions are echoed back unchanged, versions can't be added or removed, and every edit stays in draft until published. A/B-tested forms and forms with no display triggers have to be handled in the form editor.
 
+Quirks worth knowing before you edit a real form:
+- Every save must send the live version back exactly as returned, and Klaviyo often rejects it anyway: editor-built forms carry things its own validator refuses (empty layout rows, URL rules with no URLs, two teasers on one device type), and publishing from the editor does not clean them up. When that happens: `unpublish-form`, save the draft (now the only version), `publish-form`. Same form ID; the form is off the site for a few seconds; if the save fails, republish the untouched draft to restore it.
+- `unpublish-form` deletes the live version rather than pausing it. To pause a form, toggle it off in the Klaviyo UI.
+- Every publish creates a new live version ID (the editor does the same).
+- Drafts are cleaned automatically before saving (empty rows, empty URL rules); `copy-form` also drops a second same-device teaser and says so.
+- Survey/checkbox options have a `label` and a `value`; the value is what lands on the profile, so change both.
+- There is no API to delete a form.
+
 | Command | Description |
 |---|---|
 | `form` | Show a form's versions, triggers, and every block's text step by step; `--out` saves the full definition JSON for editing |
