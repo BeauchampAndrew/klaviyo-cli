@@ -110,8 +110,20 @@ Run `klaviyo COMMAND --help` for full options on any command.
 | `account-health` | Show profiles count, lists, and metrics for a client |
 | `list-metrics` | List event metrics with their IDs and integration (ID<->name catalog) |
 | `metric-aggregate` | Bucketed counts for one metric over time (hour/day/week/month, optional group-by) |
-| `forms` | List sign-up forms with live/draft status and dates, newest first (`--status`, `--versions`). Metadata only: the Forms API doesn't expose copy, timing, or targeting |
+| `forms` | List sign-up forms with live/draft status and dates, newest first (`--status`, `--versions`) |
 | `form-performance` | Show pop-up/form views, submits, and submit rates |
+
+### Forms
+Uses Forms API revision `2026-10-15` (needs `forms:read`, plus `forms:write` to edit). The API only edits **draft** versions: live versions are echoed back unchanged, versions can't be added or removed, and every edit stays in draft until published. A/B-tested forms and forms with no display triggers have to be handled in the form editor.
+
+| Command | Description |
+|---|---|
+| `form` | Show a form's versions, triggers, and every block's text step by step; `--out` saves the full definition JSON for editing |
+| `form-replace` | Find/replace any text (copy, labels, URLs) in the draft version(s); `--dry-run` shows each change; verifies by reading back. Never touches the live version |
+| `update-form` | Save an edited `form --out` file back as the definition; live versions are restored from the server and version IDs must match |
+| `copy-form` | Create a new draft form from one version of an existing form (`--version`, default the live one) |
+| `publish-form` | Publish the draft over the live version; requires the form ID typed back or `--confirm <id>` |
+| `unpublish-form` | Take a form off the site; same confirmation |
 
 ### SMS
 | Command | Description |
@@ -133,7 +145,7 @@ Run `klaviyo COMMAND --help` for full options on any command.
 |---|---|
 | `api` | Raw API pass-through: `klaviyo api <METHOD> <path>` |
 
-That's 44 commands total.
+That's 50 commands total.
 
 ## Multi-account profiles
 

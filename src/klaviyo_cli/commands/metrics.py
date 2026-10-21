@@ -140,8 +140,8 @@ def list_metrics(ctx, search_term):
 def forms(ctx, status, versions):
     """List sign-up forms with live/draft status and dates, newest first.
 
-    The Forms API exposes metadata only: copy, display timing, targeting and
-    the submit action are not available, so check those in the form editor.
+    For a form's copy, triggers and blocks use `form <id>`; to edit, see
+    form-replace / update-form.
     """
     use_json = ctx.obj["json"]
     try:
