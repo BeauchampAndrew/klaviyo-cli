@@ -102,6 +102,31 @@ def _strip_server_keys(node):
     return node
 
 
+def _clean_for_create(version):
+    """Drop what GET returns but POST rejects: rows with no blocks (they render
+    nothing) and url_patterns triggers with neither an allow nor a deny list."""
+    for step in version.get("steps") or []:
+        for col in step.get("columns") or []:
+            col["rows"] = [r for r in col.get("rows") or [] if r.get("blocks")]
+    version["triggers"] = [
+        t for t in version.get("triggers") or []
+        if not (t.get("type") == "url_patterns"
+                and not (t.get("properties") or {}).get("allow_list")
+                and not (t.get("properties") or {}).get("deny_list"))
+    ]
+    # The editor can leave two teasers on one device type; the API rejects that.
+    teasers, seen = [], set()
+    for t in version.get("teasers") or []:
+        device = t.get("device_type")
+        if device in seen:
+            click.echo(f"  Dropped a second {device} teaser: \"{_plain(t.get('content'))[:60]}\"", err=True)
+            continue
+        seen.add(device)
+        teasers.append(t)
+    version["teasers"] = teasers
+    return version
+
+
 def _require_confirm(form_id, confirm_id, verb):
     if confirm_id is None:
         if not sys.stdin.isatty():
@@ -283,7 +308,7 @@ def copy_form(ctx, form_id, name, version_id):
         if source.get("ab_test"):
             raise click.ClickException("That version is part of an A/B test; copy it in the form editor.")
 
-        version = _strip_server_keys(source)
+        version = _clean_for_create(_strip_server_keys(source))
         version["status"] = "draft"
         body = {"data": {"type": "form", "attributes": {
             "name": name, "status": "draft", "ab_test": False,

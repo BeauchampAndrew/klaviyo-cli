@@ -194,3 +194,25 @@ def test_publish_form_posts_job(mock_build):
     assert (method, path) == ("POST", "/api/form-publish-jobs/")
     assert body["data"]["relationships"]["form"]["data"]["id"] == "AbC123"
     assert "now live" in result.output
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_copy_form_drops_what_create_rejects(mock_build):
+    form = _form(with_draft=False)
+    v = form["data"]["attributes"]["definition"]["versions"][0]
+    v["steps"][0]["columns"][0]["rows"].append({"id": "R2", "blocks": []})
+    v["triggers"].append({"id": "T2", "type": "url_patterns", "properties": {"allow_list": None, "deny_list": None}})
+    v["teasers"] = [{"id": "X1", "device_type": "mobile", "content": "A"},
+                    {"id": "X2", "device_type": "mobile", "content": "B"}]
+    created = {"data": {"id": "NeW999", "attributes": {"definition": {"versions": [{"id": 300}]}}}}
+    ctx_obj, calls = _fake_ctx_factory([form, created])
+    mock_build.return_value = ctx_obj
+
+    result = CliRunner().invoke(main, ["copy-form", "AbC123", "--name", "Copy"])
+
+    assert result.exit_code == 0, result.output
+    assert "Dropped a second mobile teaser" in result.output
+    (version,) = calls[1][2]["data"]["attributes"]["definition"]["versions"]
+    assert len(version["steps"][0]["columns"][0]["rows"]) == 1
+    assert [t["type"] for t in version["triggers"]] == ["delay"]
+    assert [t["content"] for t in version["teasers"]] == ["A"]
