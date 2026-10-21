@@ -1,4 +1,4 @@
-"""Metrics commands: account health, sent-campaign windows, metric catalog, form performance."""
+"""Metrics commands: account health, sent-campaign windows, metric catalog, forms, form performance."""
 
 import urllib.parse
 from datetime import datetime
@@ -7,7 +7,7 @@ import click
 
 from .._util import _resolve_date_range, _resolve_metrics, output
 from ..cli import main
-from ..transport import APIError, AuthError
+from ..transport import KLAVIYO_BASE, APIError, AuthError
 
 # ---------------------------------------------------------------------------
 # account-health
@@ -124,6 +124,59 @@ def list_metrics(ctx, search_term):
             print(f"Metrics for {ctx.obj['label']} ({len(items)} shown):")
             for mid, info in items:
                 print(f"  {info['name']:<42} {mid:<10} {info['integration']}")
+    except (AuthError, APIError) as e:
+        raise click.ClickException(str(e))
+
+
+# ---------------------------------------------------------------------------
+# forms
+# ---------------------------------------------------------------------------
+
+
+@main.command("forms")
+@click.option("--status", type=click.Choice(["live", "draft"]), default=None, help="Only show forms with this status")
+@click.option("--versions", is_flag=True, help="Also list each form's versions (one extra call per form)")
+@click.pass_context
+def forms(ctx, status, versions):
+    """List sign-up forms with live/draft status and dates, newest first.
+
+    The Forms API exposes metadata only: copy, display timing, targeting and
+    the submit action are not available, so check those in the form editor.
+    """
+    use_json = ctx.obj["json"]
+    try:
+        path = "/api/forms/?fields[form]=name,status,created_at,updated_at"
+        items = []
+        while path:
+            data = ctx.obj["call"]("GET", path)
+            items.extend(data.get("data", []))
+            next_link = data.get("links", {}).get("next")
+            path = next_link.replace(KLAVIYO_BASE, "") if next_link else None
+
+        if status:
+            items = [f for f in items if f.get("attributes", {}).get("status") == status]
+        items.sort(key=lambda f: f.get("attributes", {}).get("updated_at") or "", reverse=True)
+
+        if versions:
+            for f in items:
+                resp = ctx.obj["call"]("GET", f"/api/forms/{f['id']}/form-versions/")
+                f["versions"] = resp.get("data", [])
+
+        if use_json:
+            output(items, use_json=True)
+            return
+
+        print(f"Forms for {ctx.obj['label']} ({len(items)}):\n")
+        print(f"  {'ID':<8} {'Status':<7} {'Updated':<11} {'Created':<11} Name")
+        print(f"  {'-'*70}")
+        for f in items:
+            a = f.get("attributes", {})
+            print(f"  {f['id']:<8} {a.get('status', '?'):<7} {(a.get('updated_at') or '')[:10]:<11} "
+                  f"{(a.get('created_at') or '')[:10]:<11} {a.get('name', '')}")
+            for v in f.get("versions", []):
+                va = v.get("attributes", {})
+                print(f"      v{v['id']} {va.get('form_type', '?')} {va.get('status', '?')} "
+                      f"updated {(va.get('updated_at') or '')[:10]}  {va.get('variation_name', '')}")
     except (AuthError, APIError) as e:
         raise click.ClickException(str(e))
 

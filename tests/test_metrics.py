@@ -103,3 +103,71 @@ def test_metric_aggregate_by_renders_dimension_blocks(mock_build):
     assert calls[0][2]["data"]["attributes"]["by"] == ["Name"]
     assert "Yoder Smokers" in result.output
     assert "Ooni" in result.output
+
+
+# ---------------------------------------------------------------------------
+# forms
+# ---------------------------------------------------------------------------
+
+
+def _form(fid, name, status, updated, created="2026-01-01T00:00:00+00:00"):
+    return {"id": fid, "attributes": {
+        "name": name, "status": status, "created_at": created, "updated_at": updated}}
+
+
+_FORMS_PAGE_1 = {
+    "data": [
+        _form("OLD111", "Newsletter Signup", "live", "2020-07-15T00:00:00+00:00"),
+        _form("NEW222", "Welcome Pop-Up", "draft", "2026-10-16T19:57:22+00:00"),
+    ],
+    "links": {"next": "https://a.klaviyo.com/api/forms/?page[cursor]=abc"},
+}
+_FORMS_PAGE_2 = {
+    "data": [_form("MID333", "Birthday Offer", "live", "2026-10-14T00:00:00+00:00")],
+    "links": {"next": None},
+}
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_forms_paginates_and_sorts_newest_first(mock_build):
+    ctx_obj, calls = _fake_ctx_factory([_FORMS_PAGE_1, _FORMS_PAGE_2])
+    mock_build.return_value = ctx_obj
+
+    result = CliRunner().invoke(main, ["forms"])
+
+    assert result.exit_code == 0, result.output
+    assert calls[1][1] == "/api/forms/?page[cursor]=abc"
+    out = result.output
+    assert out.index("Welcome Pop-Up") < out.index("Birthday Offer") < out.index("Newsletter Signup")
+    assert "NEW222" in out and "draft" in out
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_forms_status_filter(mock_build):
+    ctx_obj, _ = _fake_ctx_factory([_FORMS_PAGE_1, _FORMS_PAGE_2])
+    mock_build.return_value = ctx_obj
+
+    result = CliRunner().invoke(main, ["forms", "--status", "live"])
+
+    assert result.exit_code == 0, result.output
+    assert "Birthday Offer" in result.output
+    assert "Newsletter Signup" in result.output
+    assert "Welcome Pop-Up" not in result.output
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_forms_versions_fetches_each_listed_form(mock_build):
+    versions = {"data": [{"id": "28840506", "attributes": {
+        "form_type": "popup", "variation_name": "Copy 2 of Promo10%",
+        "status": "draft", "updated_at": "2026-10-16T19:57:22+00:00"}}]}
+    page = {"data": [_form("NEW222", "Welcome Pop-Up", "draft", "2026-10-16T19:57:22+00:00")],
+            "links": {"next": None}}
+    ctx_obj, calls = _fake_ctx_factory([page, versions])
+    mock_build.return_value = ctx_obj
+
+    result = CliRunner().invoke(main, ["forms", "--versions"])
+
+    assert result.exit_code == 0, result.output
+    assert calls[1][1] == "/api/forms/NEW222/form-versions/"
+    assert "Copy 2 of Promo10%" in result.output
+    assert "popup" in result.output

@@ -110,6 +110,7 @@ Run `klaviyo COMMAND --help` for full options on any command.
 | `account-health` | Show profiles count, lists, and metrics for a client |
 | `list-metrics` | List event metrics with their IDs and integration (ID<->name catalog) |
 | `metric-aggregate` | Bucketed counts for one metric over time (hour/day/week/month, optional group-by) |
+| `forms` | List sign-up forms with live/draft status and dates, newest first (`--status`, `--versions`). Metadata only: the Forms API doesn't expose copy, timing, or targeting |
 | `form-performance` | Show pop-up/form views, submits, and submit rates |
 
 ### SMS
@@ -132,7 +133,7 @@ Run `klaviyo COMMAND --help` for full options on any command.
 |---|---|
 | `api` | Raw API pass-through: `klaviyo api <METHOD> <path>` |
 
-That's 43 commands total.
+That's 44 commands total.
 
 ## Multi-account profiles
 
