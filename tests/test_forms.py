@@ -216,3 +216,20 @@ def test_copy_form_drops_what_create_rejects(mock_build):
     assert len(version["steps"][0]["columns"][0]["rows"]) == 1
     assert [t["type"] for t in version["triggers"]] == ["delay"]
     assert [t["content"] for t in version["teasers"]] == ["A"]
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_form_replace_strips_invisible_junk_from_every_version(mock_build):
+    form = _form()
+    for v in form["data"]["attributes"]["definition"]["versions"]:
+        v["steps"][0]["columns"][0]["rows"].append({"id": "E", "blocks": []})
+        v["triggers"].append({"id": "U", "type": "url_patterns", "properties": {"allow_list": None, "deny_list": None}})
+    ctx_obj, calls = _fake_ctx_factory([form, {"data": {}}, _form(draft_text="Enter your email")])
+    mock_build.return_value = ctx_obj
+
+    result = CliRunner().invoke(main, ["form-replace", "AbC123", "Enter you email", "Enter your email"])
+
+    assert result.exit_code == 0, result.output
+    for v in calls[1][2]["data"]["attributes"]["definition"]["versions"]:
+        assert all(r["blocks"] for r in v["steps"][0]["columns"][0]["rows"])
+        assert "url_patterns" not in [t["type"] for t in v["triggers"]]
