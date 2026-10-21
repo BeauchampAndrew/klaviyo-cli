@@ -30,8 +30,12 @@ def _get_form(call, form_id):
 
 
 def _patch_definition(call, form_id, definition, name=None):
+    # Live versions are read-only, so only drafts can be cleaned. A live version
+    # that still carries this junk fails validation and blocks every save until
+    # the form is unpublished, saved clean, and republished.
     for version in definition.get("versions") or []:
-        _drop_invisible(version)
+        if version.get("status") == "draft":
+            _drop_invisible(version)
     attrs = {"definition": definition}
     if name:
         attrs["name"] = name
@@ -106,9 +110,7 @@ def _strip_server_keys(node):
 
 def _drop_invisible(version):
     """Drop what GET returns but writes reject: rows with no blocks (they render
-    nothing) and url_patterns triggers with neither an allow nor a deny list.
-    Klaviyo accepts this on live versions too; without it, a form the editor
-    left these in can't be saved through the API at all."""
+    nothing) and url_patterns triggers with neither an allow nor a deny list."""
     for step in version.get("steps") or []:
         for col in step.get("columns") or []:
             col["rows"] = [r for r in col.get("rows") or [] if r.get("blocks")]

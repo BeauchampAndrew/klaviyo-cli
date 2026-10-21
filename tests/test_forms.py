@@ -219,7 +219,7 @@ def test_copy_form_drops_what_create_rejects(mock_build):
 
 
 @patch("klaviyo_cli.cli.build_context")
-def test_form_replace_strips_invisible_junk_from_every_version(mock_build):
+def test_form_replace_strips_invisible_junk_from_drafts_only(mock_build):
     form = _form()
     for v in form["data"]["attributes"]["definition"]["versions"]:
         v["steps"][0]["columns"][0]["rows"].append({"id": "E", "blocks": []})
@@ -230,6 +230,8 @@ def test_form_replace_strips_invisible_junk_from_every_version(mock_build):
     result = CliRunner().invoke(main, ["form-replace", "AbC123", "Enter you email", "Enter your email"])
 
     assert result.exit_code == 0, result.output
-    for v in calls[1][2]["data"]["attributes"]["definition"]["versions"]:
-        assert all(r["blocks"] for r in v["steps"][0]["columns"][0]["rows"])
-        assert "url_patterns" not in [t["type"] for t in v["triggers"]]
+    live, draft = calls[1][2]["data"]["attributes"]["definition"]["versions"]
+    assert all(r["blocks"] for r in draft["steps"][0]["columns"][0]["rows"])
+    assert "url_patterns" not in [t["type"] for t in draft["triggers"]]
+    # live is read-only: sent back exactly as received
+    assert live == form["data"]["attributes"]["definition"]["versions"][0]
