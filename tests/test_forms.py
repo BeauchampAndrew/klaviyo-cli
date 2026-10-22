@@ -235,3 +235,57 @@ def test_form_replace_strips_invisible_junk_from_drafts_only(mock_build):
     assert "url_patterns" not in [t["type"] for t in draft["triggers"]]
     # live is read-only: sent back exactly as received
     assert live == form["data"]["attributes"]["definition"]["versions"][0]
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_copy_form_turns_ab_variation_into_plain_form(mock_build):
+    form = _form(with_draft=False)
+    form["data"]["attributes"]["definition"]["versions"][0]["ab_test"] = True
+    created = {"data": {"id": "NeW1", "attributes": {"definition": {"versions": [{"id": 9}]}}}}
+    ctx_obj, calls = _fake_ctx_factory([form, created])
+    mock_build.return_value = ctx_obj
+
+    result = CliRunner().invoke(main, ["copy-form", "AbC123", "--name", "Winner"])
+
+    assert result.exit_code == 0, result.output
+    attrs = calls[1][2]["data"]["attributes"]
+    assert attrs["ab_test"] is False
+    assert attrs["definition"]["versions"][0]["ab_test"] is False
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_ab_test_form_creates_one_flagged_version_per_variant(mock_build):
+    created = {"data": {"id": "AbT1", "attributes": {"definition": {"versions": [
+        {"id": 11, "name": "Control", "ab_test": True},
+        {"id": 12, "name": "10% off", "ab_test": True},
+        {"id": 13, "name": "Test", "ab_test": False},
+    ]}}}}
+    ctx_obj, calls = _fake_ctx_factory([_form(), created])
+    mock_build.return_value = ctx_obj
+
+    result = CliRunner().invoke(main, ["ab-test-form", "AbC123", "--name", "Test",
+                                       "--variant", "Control", "--variant", "10% off"])
+
+    assert result.exit_code == 0, result.output
+    method, path, body, revision = calls[1]
+    assert (method, path, revision) == ("POST", "/api/forms/", FORMS_REVISION)
+    attrs = body["data"]["attributes"]
+    assert attrs["ab_test"] is True and attrs["status"] == "draft"
+    versions = attrs["definition"]["versions"]
+    assert [v["name"] for v in versions] == ["Control", "10% off"]
+    assert all(v["ab_test"] and v["status"] == "draft" and "id" not in v for v in versions)
+    # copied from the live version, not the draft
+    assert all(v["steps"][0]["columns"][0]["rows"][0]["blocks"][0]["properties"]["placeholder"]
+               == "Enter you email" for v in versions)
+    assert "Variation 10% off: version 12" in result.output
+    assert "Base version (added by Klaviyo, not in the test): 13" in result.output
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_ab_test_form_needs_two_distinct_variants(mock_build):
+    ctx_obj, calls = _fake_ctx_factory([])
+    mock_build.return_value = ctx_obj
+    one = CliRunner().invoke(main, ["ab-test-form", "AbC123", "--name", "T", "--variant", "A"])
+    dup = CliRunner().invoke(main, ["ab-test-form", "AbC123", "--name", "T", "--variant", "A", "--variant", "A"])
+    assert one.exit_code != 0 and dup.exit_code != 0
+    assert calls == []

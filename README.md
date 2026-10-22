@@ -111,10 +111,12 @@ Run `klaviyo COMMAND --help` for full options on any command.
 | `list-metrics` | List event metrics with their IDs and integration (ID<->name catalog) |
 | `metric-aggregate` | Bucketed counts for one metric over time (hour/day/week/month, optional group-by) |
 | `forms` | List sign-up forms with live/draft status and dates, newest first (`--status`, `--versions`) |
-| `form-performance` | Show pop-up/form views, submits, and submit rates |
+| `form-performance` | Show pop-up/form views, submits, and submit rates. `--form <id>` and/or `--by-version` switch to a per-form report split by version (A/B variations, or before/after each publish); `--since`/`--until` for exact windows |
 
 ### Forms
-Uses Forms API revision `2026-10-15` (needs `forms:read`, plus `forms:write` to edit). The API only edits **draft** versions: live versions are echoed back unchanged, versions can't be added or removed, and every edit stays in draft until published. A/B-tested forms and forms with no display triggers have to be handled in the form editor.
+Uses Forms API revision `2026-10-15` (needs `forms:read`, plus `forms:write` to edit). The API only edits **draft** versions: live versions are echoed back unchanged, versions can't be added to or removed from an existing form, and every edit stays in draft until published. Forms with no display triggers have to be handled in the form editor.
+
+A/B tests: `ab-test-form <form_id> --name NAME [--variant A --variant B]` creates a new draft form with one A/B variation per `--variant`, each a copy of the source's live version; edit each with `form-replace ... --version <id>`. Klaviyo adds one extra non-test version named after the form. The API can't publish a form with a draft A/B test (Klaviyo's rule), so start the test in the form editor. Read results with `form-performance --form <id> --by-version`. `copy-form` on a variation makes a plain form from it (e.g. to keep the winner).
 
 Quirks worth knowing before you edit a real form:
 - Every save must send the live version back exactly as returned, and Klaviyo often rejects it anyway: editor-built forms carry things its own validator refuses (empty layout rows, URL rules with no URLs, two teasers on one device type), and publishing from the editor does not clean them up. When that happens: `unpublish-form`, save the draft (now the only version), `publish-form`. Same form ID; the form is off the site for a few seconds; if the save fails, republish the untouched draft to restore it.
@@ -122,14 +124,15 @@ Quirks worth knowing before you edit a real form:
 - Every publish creates a new live version ID (the editor does the same).
 - Drafts are cleaned automatically before saving (empty rows, empty URL rules); `copy-form` also drops a second same-device teaser and says so.
 - Survey/checkbox options have a `label` and a `value`; the value is what lands on the profile, so change both.
-- There is no API to delete a form.
+- Delete a form with `klaviyo delete form <id>`.
 
 | Command | Description |
 |---|---|
 | `form` | Show a form's versions, triggers, and every block's text step by step; `--out` saves the full definition JSON for editing |
 | `form-replace` | Find/replace any text (copy, labels, URLs) in the draft version(s); `--dry-run` shows each change; verifies by reading back. Never touches the live version |
 | `update-form` | Save an edited `form --out` file back as the definition; live versions are restored from the server and version IDs must match |
-| `copy-form` | Create a new draft form from one version of an existing form (`--version`, default the live one) |
+| `copy-form` | Create a new draft form from one version of an existing form (`--version`, default the live one; an A/B variation copies out as a plain form) |
+| `ab-test-form` | Create a new draft A/B test form, one variation per `--variant` (default A and B), each copied from one version; start it in the form editor |
 | `publish-form` | Publish the draft over the live version; requires the form ID typed back or `--confirm <id>` |
 | `unpublish-form` | Take a form off the site; same confirmation |
 
@@ -146,7 +149,7 @@ Quirks worth knowing before you edit a real form:
 ### Delete
 | Command | Description |
 |---|---|
-| `delete` | Permanently delete a segment, list, campaign, or flow: `klaviyo delete <type> <id>`. Shows what uses it first, then requires the ID typed back or `--confirm <id>` |
+| `delete` | Permanently delete a segment, list, campaign, flow, or form: `klaviyo delete <type> <id>`. Shows what uses it first, then requires the ID typed back or `--confirm <id>` |
 
 ### Raw API
 | Command | Description |

@@ -1,4 +1,4 @@
-"""Sign-up form editing: form, form-replace, update-form, copy-form, publish-form, unpublish-form.
+"""Sign-up form editing: form, form-replace, update-form, copy-form, ab-test-form, publish-form, unpublish-form.
 
 The Forms API (revision 2026-10-15) edits a form through its whole `definition`:
 every PATCH replaces the stored definition, only draft versions may change,
@@ -316,11 +316,11 @@ def copy_form(ctx, form_id, name, version_id):
         if not picked:
             raise click.ClickException(f"Form {form_id} has no versions to copy.")
         source = picked[0]
-        if source.get("ab_test"):
-            raise click.ClickException("That version is part of an A/B test; copy it in the form editor.")
 
+        # An A/B variation copies out as a plain form (e.g. to promote a winner).
         version = _clean_for_create(_strip_server_keys(source))
         version["status"] = "draft"
+        version["ab_test"] = False
         body = {"data": {"type": "form", "attributes": {
             "name": name, "status": "draft", "ab_test": False,
             "definition": {"versions": [version]},
@@ -335,6 +335,78 @@ def copy_form(ctx, form_id, name, version_id):
             print(f"Created draft form [{created.get('id')}] {name}")
             print(f"  Copied from form {form_id}, version {source.get('id')} ({source.get('type')})")
             print(f"  New draft version: {', '.join(str(i) for i in result['versions'])}")
+    except (AuthError, APIError) as e:
+        raise click.ClickException(_explain(e))
+
+
+# ---------------------------------------------------------------------------
+# ab-test-form
+# ---------------------------------------------------------------------------
+
+
+@main.command("ab-test-form")
+@click.argument("form_id")
+@click.option("--name", required=True, help="Name for the new A/B test form")
+@click.option("--variant", "variants", multiple=True,
+              help="Variation name (repeat per variation; default: A and B)")
+@click.option("--version", "version_id", default=None,
+              help="Version to start every variation from (default: the live version, else the first)")
+@click.pass_context
+def ab_test_form(ctx, form_id, name, variants, version_id):
+    """Create a new draft A/B test form, every variation a copy of one version.
+
+    Edit each variation with `form-replace --version <id>`. The API can't add
+    versions to an existing form, so the test is a new form, and it can't
+    publish A/B tests: start it from the form editor, and turn the original
+    form off there at the same time.
+    """
+    call = ctx.obj["call"]
+    variants = variants or ("A", "B")
+    if len(variants) < 2:
+        raise click.ClickException("An A/B test needs at least two --variant names.")
+    if len(set(variants)) != len(variants):
+        raise click.ClickException("Variation names must be different.")
+    try:
+        versions = _versions(_get_form(call, form_id))
+        if version_id:
+            picked = [v for v in versions if str(v.get("id")) == str(version_id)]
+            if not picked:
+                raise click.ClickException(f"Version {version_id} not found on form {form_id}.")
+        else:
+            picked = [v for v in versions if v.get("status") == "live"] or versions[:1]
+        if not picked:
+            raise click.ClickException(f"Form {form_id} has no versions to copy.")
+        source = picked[0]
+
+        base = _clean_for_create(_strip_server_keys(source))
+        new_versions = []
+        for variant in variants:
+            v = copy.deepcopy(base)
+            v.update(name=variant, status="draft", ab_test=True)
+            new_versions.append(v)
+        body = {"data": {"type": "form", "attributes": {
+            "name": name, "status": "draft", "ab_test": True,
+            "definition": {"versions": new_versions},
+        }}}
+        created = call("POST", "/api/forms/", body=body, revision=FORMS_REVISION).get("data", {})
+        made = _versions(created)
+        tested = [v for v in made if v.get("ab_test")]
+        # Klaviyo adds one non-test version named after the form; it isn't a variation.
+        extra = [v for v in made if not v.get("ab_test")]
+        result = {"form": created.get("id"), "name": name, "copied_from": f"{form_id} v{source.get('id')}",
+                  "variations": {v.get("name"): v.get("id") for v in tested},
+                  "base_versions": [v.get("id") for v in extra], "status": "draft"}
+        if ctx.obj["json"]:
+            output(result, use_json=True)
+        else:
+            print(f"Created draft A/B test form [{created.get('id')}] {name}")
+            print(f"  Copied from form {form_id}, version {source.get('id')} ({source.get('type')})")
+            for v in tested:
+                print(f"  Variation {v.get('name')}: version {v.get('id')}")
+            for v in extra:
+                print(f"  Base version (added by Klaviyo, not in the test): {v.get('id')}")
+            print("  Edit a variation: form-replace <form> OLD NEW --version <id>")
+            print("  Start the test from the form editor (the API can't publish A/B tests).")
     except (AuthError, APIError) as e:
         raise click.ClickException(_explain(e))
 

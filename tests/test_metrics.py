@@ -171,3 +171,49 @@ def test_forms_versions_fetches_each_listed_form(mock_build):
     assert calls[1][1] == "/api/forms/NEW222/form-versions/"
     assert "Copy 2 of Promo10%" in result.output
     assert "popup" in result.output
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_form_performance_by_version_labels_ab_variations(mock_build):
+    report = {"data": {"attributes": {"results": [
+        {"groupings": {"form_id": "F1", "form_version_id": "12"},
+         "statistics": {"viewed_form": 1000.0, "viewed_form_uniques": 900.0, "submits": 60.0, "submit_rate": 0.06}},
+        {"groupings": {"form_id": "F1", "form_version_id": "11"},
+         "statistics": {"viewed_form": 1000.0, "viewed_form_uniques": 880.0, "submits": 40.0, "submit_rate": 0.04}},
+    ]}}}
+    form = {"data": {"attributes": {"name": "Popup test"}}}
+    versions = {"data": [
+        {"id": "11", "attributes": {"variation_name": "Control", "ab_test": {"variation_name": "Control"},
+                                    "status": "live", "created_at": "2026-10-01T00:00:00Z"}},
+        {"id": "12", "attributes": {"variation_name": "10% off", "ab_test": {"variation_name": "10% off"},
+                                    "status": "live", "created_at": "2026-10-01T00:00:00Z"}},
+    ]}
+    ctx_obj, calls = _fake_ctx_factory([report, form, versions])
+    mock_build.return_value = ctx_obj
+
+    result = CliRunner().invoke(main, ["form-performance", "--form", "F1", "--by-version",
+                                       "--since", "2026-10-01", "--until", "2026-10-21"])
+
+    assert result.exit_code == 0, result.output
+    method, path, body = calls[0]
+    assert (method, path) == ("POST", "/api/form-values-reports/")
+    attrs = body["data"]["attributes"]
+    assert attrs["group_by"] == ["form_id", "form_version_id"]
+    assert attrs["filter"] == 'equals(form_id,"F1")'
+    assert attrs["timeframe"] == {"start": "2026-10-01T00:00:00", "end": "2026-10-21T23:59:59"}
+    assert 'A/B "Control"' in result.output and 'A/B "10% off"' in result.output
+    assert "6.00%" in result.output and "4.00%" in result.output
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_form_performance_without_form_flags_keeps_monthly_totals(mock_build):
+    metrics = {"data": [_metric("V", "Viewed Form"), _metric("S", "submitted_form_step"),
+                        _metric("U", "Subscribed to Email Marketing")]}
+    agg = {"data": {"attributes": {"dates": ["2026-10-01"], "data": [{"measurements": {"count": [10]}}]}}}
+    ctx_obj, calls = _fake_ctx_factory([metrics, agg, agg, agg])
+    mock_build.return_value = ctx_obj
+    with patch("time.sleep"):
+        result = CliRunner().invoke(main, ["form-performance", "--days", "30"])
+    assert result.exit_code == 0, result.output
+    assert "last 30 days" in result.output
+    assert all(p != "/api/form-values-reports/" for _, p, _ in calls)

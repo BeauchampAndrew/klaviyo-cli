@@ -20,7 +20,7 @@ class AuthError(Exception):
 
 
 # DELETE is gated to an allowlist of paths we have intentionally vetted as safe.
-# Templates are always deletable. Segments, lists, campaigns, and flows can
+# Templates are always deletable. Segments, lists, campaigns, flows, and forms can
 # only be deleted through the `delete` command, which names the object and
 # requires its ID typed back (or passed via --confirm) before it runs. The raw
 # `api` passthrough never reaches them.
@@ -29,7 +29,7 @@ DELETE_ALLOWED_PATHS = [
 ]
 
 CONFIRMABLE_DELETE_PATHS = re.compile(
-    r"^/api/(segments|lists|campaigns|flows)/([A-Za-z0-9_-]+)/?$"
+    r"^/api/(segments|lists|campaigns|flows|forms)/([A-Za-z0-9_-]+)/?$"
 )
 
 _confirmed_delete: ContextVar[str | None] = ContextVar("_confirmed_delete", default=None)
@@ -53,7 +53,7 @@ def ensure_delete_allowed(path: str) -> None:
         return
     raise AuthError(
         f"DELETE on {path} is not allowed here. Delete segments, lists, "
-        "campaigns, and flows with `klaviyo delete <type> <id>`, which asks "
+        "campaigns, flows, and forms with `klaviyo delete <type> <id>`, which asks "
         "for explicit confirmation."
     )
 

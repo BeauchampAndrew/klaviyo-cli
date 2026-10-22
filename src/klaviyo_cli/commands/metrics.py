@@ -8,6 +8,7 @@ import click
 from .._util import _resolve_date_range, _resolve_metrics, output
 from ..cli import main
 from ..transport import KLAVIYO_BASE, APIError, AuthError
+from .forms import FORMS_REVISION
 
 # ---------------------------------------------------------------------------
 # account-health
@@ -186,17 +187,104 @@ def forms(ctx, status, versions):
 # ---------------------------------------------------------------------------
 
 
+def _form_report(ctx, form_ids, by_version, start, end, label):
+    """Per-form (or per-version) views/submits from the form reporting API.
+    Versions are how A/B variations and successive publishes are told apart."""
+    call = ctx.obj["call"]
+    group_by = ["form_id", "form_version_id"] if by_version else ["form_id"]
+    attrs = {
+        "statistics": ["viewed_form", "viewed_form_uniques", "submits", "submit_rate"],
+        "timeframe": {"start": start.strftime("%Y-%m-%dT%H:%M:%S"),
+                      "end": end.strftime("%Y-%m-%dT%H:%M:%S")},
+        "group_by": group_by,
+    }
+    if form_ids:
+        ids = ",".join(f'"{f}"' for f in form_ids)
+        attrs["filter"] = f'equals(form_id,"{form_ids[0]}")' if len(form_ids) == 1 \
+            else f"any(form_id,[{ids}])"
+    body = {"data": {"type": "form-values-report", "attributes": attrs}}
+    results = call("POST", "/api/form-values-reports/", body=body, revision=FORMS_REVISION) \
+        .get("data", {}).get("attributes", {}).get("results", [])
+
+    # Label rows: form names, and per version its variation name, status and creation
+    # date (a version is created when it's published, so the date marks its start).
+    names, versions = {}, {}
+    for fid in sorted({r.get("groupings", {}).get("form_id") for r in results} - {None}):
+        try:
+            names[fid] = call("GET", f"/api/forms/{fid}/?fields[form]=name",
+                              revision=FORMS_REVISION).get("data", {}).get("attributes", {}).get("name", "?")
+            if by_version:
+                for v in call("GET", f"/api/forms/{fid}/form-versions/",
+                              revision=FORMS_REVISION).get("data", []):
+                    va = v.get("attributes", {})
+                    versions[str(v["id"])] = {"variation": va.get("variation_name"),
+                                              "ab_test": bool(va.get("ab_test")),
+                                              "status": va.get("status"),
+                                              "created": (va.get("created_at") or "")[:10]}
+        except APIError:
+            names.setdefault(fid, "(deleted?)")
+
+    rows = []
+    for r in results:
+        g, st = r.get("groupings", {}), r.get("statistics", {})
+        row = {"form_id": g.get("form_id"), "form": names.get(g.get("form_id"), "?"),
+               "views": int(st.get("viewed_form") or 0),
+               "unique_views": int(st.get("viewed_form_uniques") or 0),
+               "submits": int(st.get("submits") or 0),
+               "submit_rate": st.get("submit_rate") or 0}
+        if by_version:
+            row["version_id"] = str(g.get("form_version_id"))
+            row.update(versions.get(row["version_id"], {}))
+        rows.append(row)
+    rows.sort(key=lambda x: (x["form"], x.get("created") or "", x.get("version_id") or ""))
+
+    if ctx.obj["json"]:
+        output({"range": label, "rows": rows}, use_json=True)
+        return
+    print(f"Form performance for {ctx.obj['label']} ({label}):\n")
+    if not rows:
+        print("  No form views in this range.")
+        return
+    current = None
+    for row in rows:
+        if row["form_id"] != current:
+            current = row["form_id"]
+            print(f"  [{current}] {row['form']}")
+            head = "Version" if by_version else ""
+            print(f"    {head:<44} {'Views':>8} {'Uniq':>8} {'Submits':>8} {'Rate':>7}")
+        if by_version:
+            # The API reports superseded published versions as "draft"; with views, they ran earlier.
+            tag = f"A/B \"{row['variation']}\"" if row.get("ab_test") \
+                else ("live" if row.get("status") == "live" else "earlier")
+            first = f"{row['version_id']} {tag} created {row.get('created') or '?'}"
+        else:
+            first = "All versions"
+        print(f"    {first[:44]:<44} {row['views']:>8,} {row['unique_views']:>8,} "
+              f"{row['submits']:>8,} {row['submit_rate'] * 100:>6.2f}%")
+
+
 @main.command("form-performance")
 @click.option("--days", default=90, help="Days to look back")
+@click.option("--since", help="Start date YYYY-MM-DD (overrides --days)")
+@click.option("--until", help="End date YYYY-MM-DD (defaults to today)")
+@click.option("--form", "form_ids", multiple=True,
+              help="Report on this form only (repeatable); switches to the per-form report")
+@click.option("--by-version", is_flag=True,
+              help="Split each form by version: A/B variations, or before/after a publish")
 @click.pass_context
-def form_performance(ctx, days):
-    """Show pop-up/form views, submits, and submit rates."""
+def form_performance(ctx, days, since, until, form_ids, by_version):
+    """Show pop-up/form views, submits, and submit rates.
+
+    With no --form/--by-version: account-wide totals by month. With either:
+    views, submits and submit rate per form (and per version), max 1 year.
+    """
     use_json = ctx.obj["json"]
     try:
-        from datetime import timedelta, timezone
+        start, end, label = _resolve_date_range(days, since, until)
+        if form_ids or by_version:
+            _form_report(ctx, list(form_ids), by_version, start, end, label)
+            return
 
-        end = datetime.now(timezone.utc)
-        start = end - timedelta(days=days)
         start_str = start.strftime("%Y-%m-%dT00:00:00")
         end_str = end.strftime("%Y-%m-%dT23:59:59")
 
@@ -290,7 +378,7 @@ def form_performance(ctx, days):
         if use_json:
             output({"views": v_counts, "submits": s_counts, "subscribers": sub_counts, "dates": v_dates}, use_json=True)
         else:
-            print(f"Form Performance for {ctx.obj['label']} (last {days} days):\n")
+            print(f"Form Performance for {ctx.obj['label']} ({label}):\n")
             print(f"  {'Month':<10} {'Views':>10} {'Submits':>10} {'Rate':>8} {'New Subs':>10}")
             print(f"  {'-'*52}")
             total_v = total_s = total_sub = 0

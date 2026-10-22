@@ -69,3 +69,29 @@ def test_delete_confirmed_runs_and_warns_about_flow(mock_build):
     assert result.exit_code == 0, result.output
     assert "flow [FL1] Push (live)" in result.output
     assert ("DELETE", "/api/segments/SEG1/") in calls
+
+
+def test_raw_delete_of_form_still_blocked():
+    with pytest.raises(AuthError, match="klaviyo delete"):
+        ensure_delete_allowed("/api/forms/F1/")
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_delete_form_uses_forms_revision_and_warns_when_live(mock_build):
+    from klaviyo_cli.commands.forms import FORMS_REVISION
+    calls = []
+
+    def call(method, path, body=None, revision=None):
+        calls.append((method, path, revision))
+        if method == "DELETE":
+            ensure_delete_allowed(path)
+            return {"_raw": ""}
+        return {"data": {"id": "F1", "attributes": {"name": "Popup", "status": "draft", "definition": {
+            "versions": [{"id": 1, "status": "live"}, {"id": 2, "status": "draft"}]}}}}
+
+    mock_build.return_value = {"call": call, "label": "t", "json": False}
+    result = CliRunner().invoke(main, ["delete", "form", "F1", "--confirm", "F1"])
+    assert result.exit_code == 0, result.output
+    assert "Live form" in result.output
+    assert ("DELETE", "/api/forms/F1/", FORMS_REVISION) in calls
+    assert all(r == FORMS_REVISION for _, _, r in calls)

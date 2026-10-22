@@ -1,4 +1,4 @@
-"""delete: remove a segment, list, campaign, or flow after explicit confirmation."""
+"""delete: remove a segment, list, campaign, flow, or form after explicit confirmation."""
 
 import sys
 import urllib.parse
@@ -8,6 +8,7 @@ import click
 from .._util import output
 from ..cli import main
 from ..transport import APIError, AuthError, KLAVIYO_BASE, confirmed_delete
+from .forms import FORMS_REVISION, _form_status
 
 # type -> (API collection, fields to show)
 TYPES = {
@@ -15,7 +16,11 @@ TYPES = {
     "list": "lists",
     "campaign": "campaigns",
     "flow": "flows",
+    "form": "forms",
 }
+
+# Forms only exist at the newer API revision.
+REVISIONS = {"form": FORMS_REVISION}
 
 
 def _paginate(call, path):
@@ -60,7 +65,7 @@ def _unsent_campaigns_referencing(call, object_id):
               help="The object's ID again, to confirm without a prompt (for scripts/agents)")
 @click.pass_context
 def delete(ctx, object_type, object_id, confirm_id):
-    """Delete a segment, list, campaign, or flow. Permanent.
+    """Delete a segment, list, campaign, flow, or form. Permanent.
 
     Shows what will be deleted (and, for segments/lists, every flow and
     unsent campaign that uses it), then requires the ID typed back. In a
@@ -68,11 +73,15 @@ def delete(ctx, object_type, object_id, confirm_id):
     """
     call = ctx.obj["call"]
     path = f"/api/{TYPES[object_type]}/{object_id}/"
+    revision = REVISIONS.get(object_type)
     try:
         extra = "?additional-fields[{0}]=profile_count".format(object_type) \
             if object_type in ("segment", "list") else ""
-        attrs = call("GET", path + extra).get("data", {}).get("attributes", {})
+        data = call("GET", path + extra, revision=revision).get("data", {})
+        attrs = data.get("attributes", {})
         name = attrs.get("name", "?")
+        if object_type == "form":
+            attrs = {**attrs, "status": _form_status(data)}
 
         click.echo(f"About to PERMANENTLY delete {object_type} [{object_id}] {name}", err=True)
         if attrs.get("status"):
@@ -83,6 +92,8 @@ def delete(ctx, object_type, object_id, confirm_id):
             click.echo("  ⚠ Sent campaign: its send history and reporting go with it.", err=True)
         if object_type == "flow" and attrs.get("status") == "live":
             click.echo("  ⚠ Live flow: anyone mid-flow stops receiving its messages.", err=True)
+        if object_type == "form" and attrs["status"].startswith("live"):
+            click.echo("  ⚠ Live form: it comes off the site, and its reporting goes with it.", err=True)
 
         if object_type in ("segment", "list"):
             uses = _flows_referencing(call, object_id) + _unsent_campaigns_referencing(call, object_id)
@@ -103,7 +114,7 @@ def delete(ctx, object_type, object_id, confirm_id):
             raise click.ClickException("Confirmation did not match the ID. Nothing deleted.")
 
         with confirmed_delete(path):
-            call("DELETE", path)
+            call("DELETE", path, revision=revision)
         result = {"deleted": object_type, "id": object_id, "name": name}
         if ctx.obj["json"]:
             output(result, use_json=True)
