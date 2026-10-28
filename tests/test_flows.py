@@ -351,11 +351,13 @@ def test_flow_series_per_message_keeps_messages_separate(mock_build):
 def test_flow_actions_sorted_newest_updated_first(mock_build):
     page = {"data": [
         {"id": "98885293", "attributes": {
-            "action_type": "SEND_EMAIL", "status": "live",
+            "definition": {"id": "98885293", "type": "send-email",
+                           "data": {"status": "live", "message": {}}},
             "created": "2026-02-03T00:00:00+00:00",
             "updated": "2026-05-12T01:08:36+00:00"}},
         {"id": "106293419", "attributes": {
-            "action_type": "SEND_SMS", "status": "draft",
+            "definition": {"id": "106293419", "type": "send-sms",
+                           "data": {"status": "draft", "message": {}}},
             "created": "2026-05-12T00:00:00+00:00",
             "updated": "2026-07-23T16:55:06+00:00"}},
     ], "links": {"next": None}}
@@ -365,10 +367,10 @@ def test_flow_actions_sorted_newest_updated_first(mock_build):
     result = CliRunner().invoke(main, ["flow-actions", "FLOW1"])
 
     assert result.exit_code == 0, result.output
-    assert "fields[flow-action]=action_type,status,created,updated" in calls[0][1]
+    assert "fields[flow-action]=definition,created,updated" in calls[0][1]
     # The 7/23 toggle must render above the older update.
     assert result.output.index("2026-07-23") < result.output.index("2026-05-12")
-    assert "SEND_SMS" in result.output
+    assert "send-sms" in result.output
     assert "draft" in result.output
 
 
@@ -416,3 +418,49 @@ def test_get_flow_definition_renders_branch_tree(mock_build):
     assert "You forgot something" in result.output
     # The YES branch renders before the NO branch.
     assert result.output.index("Yoder Email 1") < result.output.index("Catch All 1")
+
+
+# ---------------------------------------------------------------------------
+# flow-detail
+# ---------------------------------------------------------------------------
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_flow_detail_renders_steps_from_definition_in_one_call(mock_build):
+    flow = {"data": {"id": "F1", "attributes": {
+        "name": "Checkout", "status": "draft", "trigger_type": "Metric",
+        "definition": {
+            "triggers": [{"type": "metric", "id": "WM7pKR"}],
+            "profile_filter": None,
+            "entry_action_id": "1",
+            "actions": [
+                {"id": "1", "type": "time-delay",
+                 "data": {"unit": "minutes", "value": 15}, "links": {"next": "2"}},
+                {"id": "2", "type": "conditional-split",
+                 "data": {"profile_filter": {"condition_groups": [{"conditions": [
+                     {"type": "profile-metric", "metric_id": "XNPwvq", "measurement": "count",
+                      "measurement_filter": {"operator": "equals", "value": 0}}]}]}},
+                 "links": {"next_if_true": "3", "next_if_false": None}},
+                {"id": "3", "type": "send-email",
+                 "data": {"status": "live", "message": {
+                     "name": "EM1", "subject_line": "Your cart is waiting!",
+                     "preview_text": "One click away", "from_email": "a@b.com",
+                     "from_label": "Brand", "template_id": "UMZfsr"}},
+                 "links": {"next": None}},
+            ],
+        }}}}
+    ctx_obj, calls = _fake_ctx_factory([flow])
+    mock_build.return_value = ctx_obj
+
+    result = CliRunner().invoke(main, ["flow-detail", "F1"])
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    assert "additional-fields[flow]=definition" in calls[0][1]
+    out = result.output
+    assert "DELAY: 15 minute(s)" in out
+    assert "metric XNPwvq count equals 0" in out
+    assert "Subject: Your cart is waiting!" in out
+    assert "Template: UMZfsr" in out
+    # The email sits under the YES branch, indented deeper than the split.
+    assert out.index("YES:") < out.index("EMAIL 1: EM1")

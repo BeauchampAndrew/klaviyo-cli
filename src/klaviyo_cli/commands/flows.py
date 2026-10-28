@@ -9,11 +9,6 @@ from .._util import _find_placed_order_metric, _norm_name, _resolve_date_range, 
 from ..cli import main
 from ..transport import APIError, AuthError, KLAVIYO_BASE
 
-# Flow actions/messages switched to a definition-based shape at 2025-10-15
-# (no more action_type/status/settings or message content). These reads
-# parse the old shape, so pin them until they're ported.
-FLOW_ACTIONS_REVISION = "2025-07-15"
-
 # ---------------------------------------------------------------------------
 # flows
 # ---------------------------------------------------------------------------
@@ -156,6 +151,78 @@ def flow_performance(ctx, days):
         raise click.ClickException(str(e))
 
 
+def _print_detail_steps(definition: dict):
+    """Walk the definition from entry_action_id, one block per step.
+
+    Split branches are indented under YES/NO so it's clear which emails
+    each path gets.
+    """
+    actions = definition.get("actions", [])
+    by_id = {a.get("id") or a.get("temporary_id"): a for a in actions}
+    seen: set = set()
+    counter = {"step": 0}
+
+    def show(action, pad):
+        atype = action.get("type", "?")
+        data = action.get("data") or {}
+        astatus = data.get("status")
+        if atype == "send-email":
+            counter["step"] += 1
+            msg = data.get("message") or {}
+            icon = "●" if astatus == "live" else "○"
+            print(f"{pad}{icon} EMAIL {counter['step']}: {msg.get('name', '?')}")
+            print(f"{pad}  Subject: {msg.get('subject_line', '?')}")
+            print(f"{pad}  Preview: {msg.get('preview_text', '?')}")
+            print(f"{pad}  From: {msg.get('from_label', '')} <{msg.get('from_email', '')}>")
+            print(f"{pad}  Template: {msg.get('template_id', '?')}")
+            print(f"{pad}  Status: {astatus}")
+        elif atype == "send-sms":
+            counter["step"] += 1
+            msg = data.get("message") or {}
+            icon = "●" if astatus == "live" else "○"
+            body = (msg.get("body") or "").replace("\n", " ").strip()
+            print(f"{pad}{icon} SMS {counter['step']}: {body[:70]}")
+            print(f"{pad}  Status: {astatus}")
+        elif atype == "time-delay":
+            unit = str(data.get("unit", "?")).rstrip("s")
+            extra = {k: v for k, v in data.items()
+                     if k not in ("unit", "value", "secondary_value", "timezone") and v}
+            line = f"{pad}⏱ DELAY: {data.get('value', '?')} {unit}(s)"
+            if extra:
+                line += f" {json_module.dumps(extra)[:120]}"
+            print(line)
+        elif atype in ("trigger-split", "conditional-split", "boolean-branch"):
+            print(f"{pad}⑂ {atype.upper()}: {_split_summary(action)}")
+        else:
+            print(f"{pad}{_describe_action(action)}" + (f" (status: {astatus})" if astatus else ""))
+        print()
+
+    def walk(aid, depth):
+        if aid is None or aid not in by_id or aid in seen:
+            return
+        seen.add(aid)
+        action = by_id[aid]
+        pad = "  " + "    " * depth
+        show(action, pad)
+        links = action.get("links") or {}
+        if "next_if_true" in links or "next_if_false" in links:
+            print(f"{pad}  YES:")
+            walk(links.get("next_if_true"), depth + 1)
+            print(f"{pad}  NO:")
+            walk(links.get("next_if_false"), depth + 1)
+        else:
+            nxt = links.get("next")
+            for n in [nxt] if isinstance(nxt, str) else (nxt or []):
+                walk(n, depth)
+
+    walk(definition.get("entry_action_id"), 0)
+    orphans = [aid for aid in by_id if aid not in seen]
+    if orphans:
+        print(f"Unreachable steps ({len(orphans)}):")
+        for aid in orphans:
+            show(by_id[aid], "  ")
+
+
 # ---------------------------------------------------------------------------
 # flow-detail
 # ---------------------------------------------------------------------------
@@ -168,10 +235,8 @@ def flow_detail(ctx, flow_id):
     """Show full flow structure: trigger, filters, emails with subjects, delays, splits."""
     use_json = ctx.obj["json"]
     try:
-        import re as _re
-        import time as _time
-
-        # Get flow with definition (trigger + filters)
+        # The definition carries every step, including each email's subject,
+        # sender, template and status, so one call covers the whole flow.
         flow_resp = ctx.obj["call"](
             "GET",
             f"/api/flows/{flow_id}/?additional-fields[flow]=definition",
@@ -180,44 +245,29 @@ def flow_detail(ctx, flow_id):
         flow_name = flow_attrs.get("name", "?")
         trigger_type = flow_attrs.get("trigger_type", "?")
         status = flow_attrs.get("status", "?")
-        definition = flow_attrs.get("definition", {})
+        definition = flow_attrs.get("definition") or {}
+        actions = definition.get("actions", [])
 
-        # Get all flow actions
-        actions = []
-        path = f"/api/flows/{flow_id}/flow-actions/?fields[flow-action]=action_type,status,settings"
-        while path:
-            data = ctx.obj["call"]("GET", path, revision=FLOW_ACTIONS_REVISION)
-            actions.extend(data.get("data", []))
-            next_link = data.get("links", {}).get("next")
-            path = next_link.replace(KLAVIYO_BASE, "") if next_link else None
-
-        # Get message details for each SEND_EMAIL action
         messages = {}
         for a in actions:
-            if a["attributes"]["action_type"] == "SEND_EMAIL":
-                _time.sleep(0.1)
-                msg_resp = ctx.obj["call"]("GET", f"/api/flow-actions/{a['id']}/flow-messages/",
-                                           revision=FLOW_ACTIONS_REVISION)
-                for m in msg_resp.get("data", []):
-                    content = m.get("attributes", {}).get("content", {})
-                    messages[a["id"]] = {
-                        "name": m["attributes"].get("name", ""),
-                        "subject": content.get("subject", ""),
-                        "preview": content.get("preview_text", ""),
-                        "from_email": content.get("from_email", ""),
-                        "from_label": content.get("from_label", ""),
-                        "template_id": None,
-                    }
-                    # Get template ID for HTML
-                    tmpl_resp = ctx.obj["call"]("GET", f"/api/flow-messages/{m['id']}/relationships/template/")
-                    tmpl_id = tmpl_resp.get("data", {}).get("id")
-                    messages[a["id"]]["template_id"] = tmpl_id
+            if a.get("type") == "send-email":
+                data = a.get("data") or {}
+                msg = data.get("message") or {}
+                messages[a.get("id")] = {
+                    "name": msg.get("name", ""),
+                    "subject": msg.get("subject_line", ""),
+                    "preview": msg.get("preview_text", ""),
+                    "from_email": msg.get("from_email", ""),
+                    "from_label": msg.get("from_label", ""),
+                    "template_id": msg.get("template_id"),
+                    "status": data.get("status"),
+                }
 
         if use_json:
             output({
                 "flow": flow_attrs,
                 "definition": definition,
-                "actions": [a["attributes"] | {"id": a["id"]} for a in actions],
+                "actions": actions,
                 "messages": messages,
             }, use_json=True)
         else:
@@ -267,68 +317,7 @@ def flow_detail(ctx, flow_id):
 
             print(f"\n{'='*80}")
             print(f"Flow Steps ({len(actions)} total):\n")
-
-            step = 0
-            for a in actions:
-                attrs = a["attributes"]
-                atype = attrs["action_type"]
-                astatus = attrs["status"]
-
-                if atype == "SEND_EMAIL":
-                    step += 1
-                    msg = messages.get(a["id"], {})
-                    status_icon = "●" if astatus == "live" else "○"
-                    print(f"  {status_icon} EMAIL {step}: {msg.get('name', '?')}")
-                    print(f"    Subject: {msg.get('subject', '?')}")
-                    print(f"    Preview: {msg.get('preview', '?')}")
-                    print(f"    From: {msg.get('from_label', '')} <{msg.get('from_email', '')}>")
-                    print(f"    Status: {astatus}")
-                    print()
-
-                elif atype == "SEND_SMS":
-                    step += 1
-                    print(f"  ● SMS {step}")
-                    print(f"    Status: {astatus}")
-                    print()
-
-                elif atype == "TIME_DELAY":
-                    settings = attrs.get("settings", {})
-                    seconds = settings.get("delay_seconds", 0)
-                    days_of_week = settings.get("days_of_week", [])
-                    if seconds >= 86400:
-                        delay_str = f"{seconds // 86400} day(s)"
-                    elif seconds >= 3600:
-                        delay_str = f"{seconds // 3600} hour(s)"
-                    else:
-                        delay_str = f"{seconds // 60} min"
-                    dow = f" [{','.join(d[:3] for d in days_of_week)}]" if len(days_of_week) < 7 else ""
-                    print(f"  ⏱ DELAY: {delay_str}{dow}")
-                    print()
-
-                elif atype == "BOOLEAN_BRANCH":
-                    settings = attrs.get("settings", {})
-                    print(f"  ⑂ SPLIT (conditional)")
-                    if settings:
-                        print(f"    {json_module.dumps(settings)[:300]}")
-                    print()
-
-                elif atype == "CONDITIONAL_SPLIT":
-                    settings = attrs.get("settings", {})
-                    print(f"  ⑂ CONDITIONAL SPLIT")
-                    if settings:
-                        print(f"    {json_module.dumps(settings)[:300]}")
-                    print()
-
-                elif atype == "TRIGGER_FILTER":
-                    settings = attrs.get("settings", {})
-                    print(f"  ⚡ TRIGGER FILTER")
-                    if settings:
-                        print(f"    {json_module.dumps(settings)[:300]}")
-                    print()
-
-                else:
-                    print(f"  ? {atype} (status: {astatus})")
-                    print()
+            _print_detail_steps(definition)
 
     except (AuthError, APIError) as e:
         raise click.ClickException(str(e))
@@ -433,9 +422,8 @@ def _print_action_tree(definition: dict):
 def get_flow(ctx, flow_id, show_definition):
     """Show a flow's basics in one call; --definition adds trigger, action chain, reentry.
 
-    Cheap single-GET alternative to `flow-detail`, which walks every action
-    and message with extra API calls to pull subjects, senders, and templates.
-    Use this for a quick look; use `flow-detail` for the full step-by-step dump.
+    Compact view: one line per step. Use `flow-detail` for the full
+    step-by-step dump (filters, every email's subject/preview/sender/template).
     """
     use_json = ctx.obj["json"]
     try:
@@ -708,9 +696,9 @@ def flow_actions(ctx, flow_id):
     try:
         actions: list = []
         path = (f"/api/flows/{flow_id}/flow-actions/"
-                "?fields[flow-action]=action_type,status,created,updated&page[size]=50")
+                "?fields[flow-action]=definition,created,updated&page[size]=50")
         while path:
-            data = ctx.obj["call"]("GET", path, revision=FLOW_ACTIONS_REVISION)
+            data = ctx.obj["call"]("GET", path)
             actions.extend(data.get("data", []))
             next_link = data.get("links", {}).get("next")
             path = next_link.replace(KLAVIYO_BASE, "") if next_link else None
@@ -724,10 +712,12 @@ def flow_actions(ctx, flow_id):
         print(f"Flow actions for {flow_id} ({len(actions)} total, newest update first):")
         for a in actions:
             attrs = a.get("attributes", {})
+            definition = attrs.get("definition") or {}
+            astatus = (definition.get("data") or {}).get("status") or "-"
             updated = attrs.get("updated") or "?"
             created = (attrs.get("created") or "?").split("T")[0]
-            print(f"  {updated}  {attrs.get('status', '?'):<7} "
-                  f"{attrs.get('action_type', '?'):<18} id={a.get('id')} "
+            print(f"  {updated}  {astatus:<7} "
+                  f"{definition.get('type', '?'):<18} id={a.get('id')} "
                   f"(created {created})")
     except (AuthError, APIError) as e:
         raise click.ClickException(str(e))
