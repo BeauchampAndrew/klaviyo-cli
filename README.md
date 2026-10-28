@@ -92,6 +92,12 @@ Uses API revision `2026-10-15`, where a campaign is a container of messages and 
 | `flow-series` | Flow performance over time (daily/weekly/monthly buckets, per flow or per message) |
 | `flow-actions` | List a flow's actions with status and created/updated timestamps (audit view) |
 | `create-flow` | Create a flow (in draft) from a definition, guarding against duplicates |
+| `flow-add-delay` | Insert a delay `--before N` or `--after N` (message numbers as `flow-detail` prints them) with `--days`/`--hours`/`--minutes` |
+| `flow-set-delay` | Change the delay right before message N |
+| `flow-add-email` | Insert an email (created in Draft, sends nothing until switched live); `--copy N` starts from another email's settings and template, `--subject`/`--preview`/`--name`/`--template` override |
+| `flow-remove-step` | Remove message N (`--message`) or the delay before it (`--delay-before`); asks first unless `--yes` |
+
+Delays are always live, so adding, changing, or removing one in a live flow affects profiles already in it; those commands refuse a live flow without `--live-ok`. Klaviyo can't insert conditional/trigger splits or A/B tests, and trigger and profile filters can't be edited through the API at all. Inserts aren't idempotent, so each command reads the flow back instead of retrying.
 
 ### Profiles
 | Command | Description |
@@ -157,6 +163,15 @@ klaviyo edit-template <template_id> --replace "utm_campaign=old" "utm_campaign=n
 - Templates copied from another Klaviyo account reference that account's images, which Klaviyo rejects on save. Those images are re-imported (hidden) into this account and the save is retried.
 - Klaviyo's API can't open some drag-and-drop templates (a header block with a logo in the "links" layout). Edit those in the Klaviyo editor.
 - A sent campaign is refused. Scheduled campaigns and live flows are edited with a note that the change goes out on the next send.
+
+`convert-template <id>` turns an HTML template into a new drag-and-drop one (the original is untouched); `convert-template --campaign <id>` does it for a draft campaign and puts the drag-and-drop version on the campaign. Paid Klaviyo plans only, one conversion a minute, 1-2 minutes each. Text, links, and images carry over; the hidden preheader div doesn't (use the campaign's preview text). Check the result in the editor before sending.
+
+### Billing
+| Command | Description |
+|---|---|
+| `billing-usage` | This period's usage against plan caps: active profiles, email sends, SMS credits, plus a period-end projection for sends and credits. Flags anything at or over `--warn` (default 85%) and exits 3 so a scheduled check can alert. Add-on products (Customer Hub, K:Social, reviews) are listed but never flagged: they count every profile against their own small free tier |
+
+Needs the `usage:read` scope ("Usage: Read Access" on the API key). Keys made before Klaviyo added that scope don't have it, even full-access ones. The API can only read usage; there is no endpoint that changes a plan.
 
 ### SMS
 | Command | Description |
