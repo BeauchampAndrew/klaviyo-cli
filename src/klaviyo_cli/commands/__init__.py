@@ -11,3 +11,4 @@ from . import forms  # noqa: F401
 from . import raw  # noqa: F401
 from . import images  # noqa: F401
 from . import test_send  # noqa: F401
+from . import edit_template  # noqa: F401

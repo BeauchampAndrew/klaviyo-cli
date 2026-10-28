@@ -24,6 +24,10 @@ from ..cli import main
 from ..transport import APIError, AuthError, KLAVIYO_BASE
 
 LEGACY_REVISION = "2026-07-15"
+# From 2026-04-15 on, GET /api/templates validates the drag-and-drop definition
+# and fails outright for some templates ("Header blocks with 'links' desktop
+# layout must not include a logo subblock"). Older revisions return their HTML.
+TEMPLATE_READ_REVISION = "2026-01-15"
 
 STATUSES = ("draft", "scheduled", "sending", "sent", "cancelled")
 
@@ -732,7 +736,8 @@ def get_creative(ctx, campaign_id, show_html, grep_term):
         for v in view["variations"]:
             html = text = None
             if v.get("template_id"):
-                tattrs = call("GET", f"/api/templates/{v['template_id']}/").get("data", {}).get("attributes", {})
+                tattrs = call("GET", f"/api/templates/{v['template_id']}/",
+                              revision=TEMPLATE_READ_REVISION).get("data", {}).get("attributes", {})
                 html = tattrs.get("html")
                 text = tattrs.get("text")
             results.append({
@@ -965,7 +970,8 @@ def set_campaign_html(ctx, campaign_id, html_path, expect, forbid, message_id, k
 
             live_tpl = _variation_details(
                 call("GET", f"/api/campaign-variations/{vid}/").get("data") or {}).get("template_id")
-            live_html = ((call("GET", f"/api/templates/{live_tpl}/").get("data") or {})
+            live_html = ((call("GET", f"/api/templates/{live_tpl}/", revision=TEMPLATE_READ_REVISION)
+                          .get("data") or {})
                          .get("attributes") or {}).get("html") or ""
 
             images = _IMG_SRC.findall(html)

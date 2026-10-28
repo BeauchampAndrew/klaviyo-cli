@@ -142,6 +142,22 @@ Quirks worth knowing before you edit a real form:
 | `publish-form` | Publish the draft over the live version; requires the form ID typed back or `--confirm <id>` |
 | `unpublish-form` | Take a form off the site; same confirmation |
 
+### Editing emails
+`edit-template` changes copy, links, or images in an existing email: a template ID, `--campaign <id>`, or `--flow <id> --email N` (numbered as in `flow-detail`). With no edits it lists the email's copy and numbered images.
+
+```bash
+klaviyo edit-template --campaign <id> --replace "Ends Friday" "Ends Sunday"
+klaviyo edit-template --flow TCAqyz --email 2 --image 3 ./new-hero.png --alt 3 "New hero"
+klaviyo edit-template <template_id> --replace "utm_campaign=old" "utm_campaign=new" --dry-run
+```
+
+- Works on drag-and-drop and HTML templates. `--replace` changes every match, including button, image, and header links in drag-and-drop emails. Text split by formatting (half bold) won't match; use a shorter piece. If any `--replace` finds nothing, nothing is saved.
+- New images (URL or local JPEG/PNG/GIF up to 5 MB) are imported into the account's image library first, because Klaviyo requires a library asset on every drag-and-drop image. Local files go up as JSON, so this works through JSON-only proxies.
+- Klaviyo's API drops crop settings on any drag-and-drop save: a cropped image still shows cropped, but the crop can't be re-adjusted in the editor.
+- Templates copied from another Klaviyo account reference that account's images, which Klaviyo rejects on save. Those images are re-imported (hidden) into this account and the save is retried.
+- Klaviyo's API can't open some drag-and-drop templates (a header block with a logo in the "links" layout). Edit those in the Klaviyo editor.
+- A sent campaign is refused. Scheduled campaigns and live flows are edited with a note that the change goes out on the next send.
+
 ### SMS
 | Command | Description |
 |---|---|
