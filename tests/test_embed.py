@@ -52,12 +52,9 @@ class FakeCampaignTransport:
             "data": {
                 "id": "CAMP1",
                 "attributes": {
-                    "name": "Test Campaign",
-                    "status": "Draft",
-                    "send_time": None,
-                    "created_at": "2026-01-01T00:00:00Z",
-                    "audiences": {"included": ["SEG1"], "excluded": []},
-                    "send_strategy": {"method": "static"},
+                    "created": "2026-01-01T00:00:00Z",
+                    "definition": {"name": "Test Campaign", "status": "sent",
+                                   "send_options": {"send_time": "2026-01-02T00:00:00Z"}},
                 },
             },
             "included": [],

@@ -10,7 +10,7 @@ def _fake_ctx_factory(response):
     calls = []
 
     def call(method, path, body=None, revision=None):
-        calls.append((method, path, body))
+        calls.append((method, path, body, revision))
         return response
 
     return {"call": call, "label": "test-account"}, calls
@@ -40,9 +40,11 @@ def test_upload_sms_builds_campaign_payload(mock_build):
     ])
     assert result.exit_code == 0, result.output
     assert len(calls) == 1
-    method, path, body = calls[0]
+    method, path, body, revision = calls[0]
     assert method == "POST"
     assert path == "/api/campaigns/"
+    # The draft's send date only has a field at the legacy revision.
+    assert revision == "2026-07-15"
 
     attrs = body["data"]["attributes"]
     assert attrs["send_strategy"]["datetime"] == _parse_send_time("04-11-2026", "3:00 PM EDT")
@@ -72,6 +74,6 @@ def test_upload_sms_body_from_file(mock_build, tmp_path):
         "--include", "SEGA",
     ])
     assert result.exit_code == 0, result.output
-    _, _, body = calls[0]
+    _, _, body, _ = calls[0]
     message = body["data"]["attributes"]["campaign-messages"]["data"][0]
     assert message["attributes"]["definition"]["content"]["body"] == "Text from file body"

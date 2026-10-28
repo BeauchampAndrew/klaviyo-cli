@@ -8,6 +8,7 @@ import click
 from .._util import _resolve_date_range, _resolve_metrics, output
 from ..cli import main
 from ..transport import KLAVIYO_BASE, APIError, AuthError
+from .campaigns import _list_messages
 from .forms import FORMS_REVISION
 
 # ---------------------------------------------------------------------------
@@ -72,24 +73,24 @@ def metrics(ctx, days, since, until):
     try:
         start, end, label = _resolve_date_range(days, since, until)
 
-        # Klaviyo campaign-filter quirk: datetime values must NOT be quoted.
-        filter_str = (
-            "equals(messages.channel,'email'),equals(status,'Sent'),"
-            f"greater-or-equal(scheduled_at,{start.strftime('%Y-%m-%dT%H:%M:%SZ')}),"
-            f"less-than(scheduled_at,{end.strftime('%Y-%m-%dT%H:%M:%SZ')})"
-        )
-        encoded = urllib.parse.quote(filter_str)
-        path = (
-            f"/api/campaigns/?filter={encoded}"
-            "&sort=-scheduled_at"
-            "&fields[campaign]=name,status,send_time"
-        )
-        data = ctx.obj["call"]("GET", path)
+        # Messages have no send-time filter. A message sent in the window was
+        # last updated at or after its send, so filter on updated and trim to
+        # the window by send_time. (Datetime filter values must NOT be quoted.)
+        rows = _list_messages(ctx.obj["call"], [
+            "equals(status,'sent')",
+            f"greater-or-equal(updated,{start.strftime('%Y-%m-%dT%H:%M:%SZ')})",
+        ], "email")
+        def sent_at(row):
+            st = row["attributes"]["send_time"]
+            return datetime.fromisoformat(st) if st else None
+
+        items = [r for r in rows if sent_at(r) and start <= sent_at(r) < end]
+        items.sort(key=sent_at, reverse=True)
+        data = {"data": items}
 
         if use_json:
             output(data, use_json=True)
         else:
-            items = data.get("data", [])
             print(f"Sent Campaigns for {ctx.obj['label']} ({label}):")
             if not items:
                 print("  (none)")

@@ -1,4 +1,16 @@
-"""Campaign commands: list, search, patch, schedule, creative, performance."""
+"""Campaign commands: list, search, patch, schedule, creative, performance.
+
+Since API revision 2026-10-15 a campaign is a container of messages. Each
+message has one audience and one or more variations, and the subject, sender
+and template live on the variation. The ID a campaign has always had (in the
+UI URL and in reporting) is now its MESSAGE ID; the container got a new one.
+So these commands treat the message ID as "the campaign ID" and also accept a
+container ID when the container holds a single message.
+
+One thing has no home in the new model: the planned send date of a draft that
+isn't scheduled yet. Setting it (patch-campaign --date, upload-sms) and sending
+at it (schedule) still go through LEGACY_REVISION, where the same ID works.
+"""
 
 import re
 import urllib.parse
@@ -10,6 +22,11 @@ import click
 from .._util import _parse_send_time, _resolve_date_range, output
 from ..cli import main
 from ..transport import APIError, AuthError, KLAVIYO_BASE
+
+LEGACY_REVISION = "2026-07-15"
+
+STATUSES = ("draft", "scheduled", "sending", "sent", "cancelled")
+
 
 def _send_time_label(attrs: dict, unset: str = "not scheduled") -> str:
     """Scheduled campaigns carry send_time. An unscheduled draft keeps the date
@@ -38,6 +55,170 @@ def _audience_label(call, audience_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# message model helpers
+# ---------------------------------------------------------------------------
+
+
+def _not_found(e: Exception) -> bool:
+    text = str(e).lower()
+    return "not found" in text or "does not exist" in text
+
+
+def _status_label(status: str | None) -> str:
+    """'sent' -> 'Sent', matching what the CLI printed before 2026-10-15."""
+    return (status or "?").capitalize()
+
+
+def _variation_details(v: dict) -> dict:
+    details = (((v.get("attributes") or {}).get("definition") or {}).get("details") or {})
+    return {"id": v.get("id"), **details}
+
+
+def _message_view(resp: dict) -> dict:
+    """Flatten a campaign-message response (with campaign + variations included)."""
+    data = resp.get("data") or {}
+    attrs = data.get("attributes") or {}
+    definition = attrs.get("definition") or {}
+    rels = data.get("relationships") or {}
+    included = resp.get("included") or []
+    return {
+        "id": data.get("id"),
+        "campaign_id": ((rels.get("campaign") or {}).get("data") or {}).get("id"),
+        "audience_id": ((rels.get("campaign-audience") or {}).get("data") or {}).get("id"),
+        "name": definition.get("name"),
+        "status": definition.get("status"),
+        "send_time": (definition.get("send_options") or {}).get("send_time"),
+        "send_strategy": (definition.get("send_options") or {}).get("send_strategy"),
+        "created": attrs.get("created"),
+        "variations": [_variation_details(i) for i in included
+                       if i.get("type") == "campaign-variation"],
+    }
+
+
+def _get_message(call, message_id: str) -> dict:
+    return _message_view(call(
+        "GET", f"/api/campaign-messages/{message_id}/?include=campaign,campaign-variations"))
+
+
+def _load(call, campaign_id: str, message_id: str | None = None) -> dict:
+    """The message behind a campaign ID. Takes a message ID (the old campaign
+    ID) or a container ID whose campaign holds one message; message_id picks
+    one message when the container holds several."""
+    if message_id:
+        return _get_message(call, message_id)
+    try:
+        return _get_message(call, campaign_id)
+    except APIError as e:
+        if not _not_found(e):
+            raise
+    try:
+        msgs = call("GET", f"/api/campaigns/{campaign_id}/campaign-messages/").get("data", [])
+    except APIError as e:
+        if _not_found(e):
+            raise click.ClickException(f"No campaign or campaign message with ID {campaign_id}.")
+        raise
+    if not msgs:
+        # An unknown container ID returns an empty list here, not a 404.
+        raise click.ClickException(f"No campaign or campaign message with ID {campaign_id}.")
+    if len(msgs) > 1:
+        ids = ", ".join(m.get("id", "?") for m in msgs)
+        raise click.ClickException(
+            f"Campaign {campaign_id} has {len(msgs)} messages ({ids}); "
+            "pass one of those IDs or --message-id."
+        )
+    return _get_message(call, msgs[0]["id"])
+
+
+def _only_variation(view: dict) -> dict:
+    variations = view["variations"]
+    if not variations:
+        raise click.ClickException(f"Campaign {view['id']} has no content variation.")
+    if len(variations) > 1:
+        raise click.ClickException(
+            f"Campaign {view['id']} has {len(variations)} content variations (an A/B test); "
+            "edit it in the Klaviyo UI."
+        )
+    return variations[0]
+
+
+def _audience(call, view: dict) -> dict:
+    """{'included': [...], 'excluded': [...]} for the message's audience."""
+    if view.get("audience_id"):
+        path = f"/api/campaign-audiences/{view['audience_id']}/"
+    else:
+        path = f"/api/campaign-messages/{view['id']}/campaign-audience/"
+    data = call("GET", path).get("data") or {}
+    definition = ((data.get("attributes") or {}).get("definition") or {})
+    return {"id": data.get("id"), "included": definition.get("included") or [],
+            "excluded": definition.get("excluded") or []}
+
+
+def _legacy_send_strategy(call, message_id: str) -> dict:
+    """An unscheduled draft's planned date only exists at LEGACY_REVISION."""
+    try:
+        resp = call("GET", f"/api/campaigns/{message_id}/?fields[campaign]=send_strategy",
+                    revision=LEGACY_REVISION)
+    except APIError:
+        return {}
+    return ((resp.get("data") or {}).get("attributes") or {}).get("send_strategy") or {}
+
+
+def _row(message: dict, variations: dict) -> dict:
+    """One list row, in the shape these commands' --json printed before 2026-10-15
+    (id + attributes.name/status/send_time/created_at), plus channel and subject."""
+    attrs = message.get("attributes") or {}
+    definition = attrs.get("definition") or {}
+    rels = message.get("relationships") or {}
+    var_ids = [v.get("id") for v in ((rels.get("campaign-variations") or {}).get("data") or [])]
+    first = next((variations[v] for v in var_ids if v in variations), {})
+    return {
+        "id": message.get("id"),
+        "type": "campaign",
+        "attributes": {
+            "name": definition.get("name"),
+            "status": _status_label(definition.get("status")),
+            "send_time": (definition.get("send_options") or {}).get("send_time"),
+            "created_at": attrs.get("created"),
+            "channel": first.get("channel"),
+            "subject": first.get("subject"),
+        },
+        "campaign_id": ((rels.get("campaign") or {}).get("data") or {}).get("id"),
+        "audience_id": ((rels.get("campaign-audience") or {}).get("data") or {}).get("id"),
+    }
+
+
+def _list_messages(call, filters: list[str], channel: str | None = None,
+                   limit: int | None = None) -> list[dict]:
+    """Campaign messages matching the filters, newest first, as list rows.
+    Channel lives on the variations, so it's filtered here, not by the API."""
+    params = ["sort=-created", "page[size]=100", "include=campaign-variations",
+              "fields[campaign-variation]=definition"]
+    if filters:
+        filt = filters[0] if len(filters) == 1 else "and(" + ",".join(filters) + ")"
+        params.insert(0, f"filter={urllib.parse.quote(filt)}")
+    path = "/api/campaign-messages/?" + "&".join(params)
+    rows: list[dict] = []
+    while path and (limit is None or len(rows) < limit):
+        data = call("GET", path)
+        variations = {v.get("id"): _variation_details(v) for v in data.get("included") or []}
+        for m in data.get("data", []):
+            row = _row(m, variations)
+            if channel is None or row["attributes"]["channel"] == channel:
+                rows.append(row)
+        next_link = (data.get("links") or {}).get("next")
+        path = next_link.replace(KLAVIYO_BASE, "") if next_link else None
+    return rows[:limit] if limit is not None else rows
+
+
+def _status_filter(status: str) -> str:
+    """Accept the old capitalized statuses ('Sent', 'Cancelled: No Recipients')."""
+    value = status.split(":")[0].strip().lower()
+    if value not in STATUSES:
+        raise click.UsageError(f"--status must be one of: {', '.join(STATUSES)}")
+    return f"equals(status,'{value}')"
+
+
+# ---------------------------------------------------------------------------
 # list-drafts
 # ---------------------------------------------------------------------------
 
@@ -48,25 +229,19 @@ def list_drafts(ctx):
     """List draft email campaigns for a client."""
     use_json = ctx.obj["json"]
     try:
-        filter_val = urllib.parse.quote(
-            "and(equals(messages.channel,'email'),equals(status,'Draft'))"
-        )
-        fields = "fields[campaign]=name,status,created_at,updated_at,send_time"
-        path = f"/api/campaigns/?filter={filter_val}&{fields}"
-        data = ctx.obj["call"]("GET", path)
+        campaigns = _list_messages(ctx.obj["call"], ["equals(status,'draft')"], "email")
 
         if use_json:
-            output(data, use_json=True)
+            output({"data": campaigns}, use_json=True)
         else:
-            campaigns = data.get("data", [])
             print(f"Draft Campaigns for {ctx.obj['label']}:")
             if not campaigns:
                 print("  (none)")
                 return
             for item in campaigns:
-                attrs = item.get("attributes", {})
+                attrs = item["attributes"]
                 created = (attrs.get("created_at") or "").split("T")[0]
-                print(f"  [{item['id']}] \"{attrs.get('name', '?')}\" — created {created}")
+                print(f"  [{item['id']}] \"{attrs.get('name') or '?'}\" — created {created}")
     except (AuthError, APIError) as e:
         raise click.ClickException(str(e))
 
@@ -85,49 +260,50 @@ def get_campaign(ctx, campaign_id, show_names):
     """Show details for a specific campaign."""
     use_json = ctx.obj["json"]
     try:
-        fields = (
-            "fields[campaign]=name,status,send_time,created_at,audiences,send_strategy"
-            "&include=campaign-messages&fields[campaign-message]=definition"
-        )
-        path = f"/api/campaigns/{campaign_id}/?{fields}"
-        data = ctx.obj["call"]("GET", path)
+        call = ctx.obj["call"]
+        view = _load(call, campaign_id)
+        audience = _audience(call, view)
+        strategy = {}
+        if view["status"] == "draft" and not view["send_time"]:
+            strategy = _legacy_send_strategy(call, view["id"])
+        variation = view["variations"][0] if view["variations"] else {}
+        # Subject + preview text let the scheduling workflow catch clone-leftover
+        # subject lines (an email whose SL belongs to the cloned-from campaign).
+        subject = variation.get("subject")
+        preview = variation.get("preview_text")
+        attrs = {"send_time": view["send_time"], "send_strategy": strategy}
 
         if use_json:
-            output(data, use_json=True)
-        else:
-            item = data.get("data", {})
-            attrs = item.get("attributes", {})
-            audiences = attrs.get("audiences") or {}
-            included = audiences.get("included") or []
-            excluded = audiences.get("excluded") or []
-            send_strategy = attrs.get("send_strategy") or {}
-            # Subject + preview text live on the related campaign-message,
-            # pulled in via include=campaign-messages. Surfacing them here lets
-            # the scheduling workflow catch clone-leftover subject lines (an
-            # email whose SL belongs to a different, cloned-from campaign).
-            subject = preview = None
-            for msg in data.get("included") or []:
-                content = (
-                    ((msg.get("attributes") or {}).get("definition") or {}).get("content") or {}
-                )
-                if content.get("subject") is not None or content.get("preview_text") is not None:
-                    subject = content.get("subject")
-                    preview = content.get("preview_text")
-                    break
-            print(f"Campaign: {attrs.get('name', '?')}")
-            print(f"  ID: {item.get('id', '?')}")
-            print(f"  Status: {attrs.get('status', '?')}")
-            print(f"  Subject: {subject or '(none)'}")
-            print(f"  Preview: {preview or '(none)'}")
-            if show_names:
-                included = [_audience_label(ctx.obj["call"], a) for a in included]
-                excluded = [_audience_label(ctx.obj["call"], a) for a in excluded]
-            print(f"  Send Time: {_send_time_label(attrs)}")
-            print(f"  Created: {(attrs.get('created_at') or '').split('T')[0]}")
-            print("  Audiences:")
-            print(f"    Include: {', '.join(included) or '(none)'}")
-            print(f"    Exclude: {', '.join(excluded) or '(none)'}")
-            print(f"  Send Strategy: {send_strategy.get('method', 'N/A')}")
+            output({"data": {"id": view["id"], "type": "campaign", "attributes": {
+                "name": view["name"],
+                "status": _status_label(view["status"]),
+                "send_time": view["send_time"],
+                "created_at": view["created"],
+                "audiences": {"included": audience["included"],
+                              "excluded": audience["excluded"]},
+                "send_strategy": strategy or {"method": view["send_strategy"], "datetime": None},
+                "subject": subject,
+                "preview_text": preview,
+            }}, "campaign_id": view["campaign_id"], "variations": view["variations"]},
+                use_json=True)
+            return
+        included, excluded = audience["included"], audience["excluded"]
+        if show_names:
+            included = [_audience_label(call, a) for a in included]
+            excluded = [_audience_label(call, a) for a in excluded]
+        print(f"Campaign: {view['name'] or '?'}")
+        print(f"  ID: {view['id']}")
+        if campaign_id != view["id"]:
+            print(f"  (container campaign {campaign_id})")
+        print(f"  Status: {_status_label(view['status'])}")
+        print(f"  Subject: {subject or '(none)'}")
+        print(f"  Preview: {preview or '(none)'}")
+        print(f"  Send Time: {_send_time_label(attrs)}")
+        print(f"  Created: {(view['created'] or '').split('T')[0]}")
+        print("  Audiences:")
+        print(f"    Include: {', '.join(included) or '(none)'}")
+        print(f"    Exclude: {', '.join(excluded) or '(none)'}")
+        print(f"  Send Strategy: {strategy.get('method') or view['send_strategy'] or 'N/A'}")
     except (AuthError, APIError) as e:
         raise click.ClickException(str(e))
 
@@ -144,29 +320,27 @@ def search_campaigns(ctx, query):
     """Search campaigns by name."""
     use_json = ctx.obj["json"]
     try:
-        filter_str = f"equals(messages.channel,'email'),contains(name,'{query}')"
-        encoded = urllib.parse.quote(filter_str)
-        path = f"/api/campaigns/?filter={encoded}&fields[campaign]=name,status,send_time,created_at"
-        data = ctx.obj["call"]("GET", path)
+        # Filter strings take either quote; use double quotes for "Valentine's".
+        quoted = f'"{query}"' if "'" in query else f"'{query}'"
+        filters = [f"contains(name,{quoted})"] if query else []
+        campaigns = _list_messages(ctx.obj["call"], filters, "email")
 
         if use_json:
-            output(data, use_json=True)
+            output({"data": campaigns}, use_json=True)
         else:
-            campaigns = data.get("data", [])
             print(f"Campaigns matching '{query}' for {ctx.obj['label']} ({len(campaigns)} results):")
             if not campaigns:
                 print("  (none)")
                 return
             for item in campaigns:
-                attrs = item.get("attributes", {})
-                status = attrs.get("status", "?")
+                attrs = item["attributes"]
                 send_time = attrs.get("send_time")
                 if send_time:
                     date_part = f"(send: {send_time.split('T')[0]})"
                 else:
                     created = (attrs.get("created_at") or "").split("T")[0]
                     date_part = f"(created: {created})"
-                print(f"  [{item['id']}] \"{attrs.get('name', '?')}\" — {status} {date_part}")
+                print(f"  [{item['id']}] \"{attrs.get('name') or '?'}\" — {attrs['status']} {date_part}")
     except (AuthError, APIError) as e:
         raise click.ClickException(str(e))
 
@@ -186,63 +360,51 @@ def search_campaigns(ctx, query):
 def patch_campaign(ctx, campaign_id, date_val, time_val, include_ids, exclude_ids):
     """Update campaign send time and/or audiences."""
     use_json = ctx.obj["json"]
+    if date_val and not time_val:
+        raise click.UsageError("--date requires --time as well.")
+    if time_val and not date_val:
+        raise click.UsageError("--time requires --date as well.")
+    set_audiences = include_ids is not None or exclude_ids is not None
+    if not date_val and not set_audiences:
+        raise click.UsageError("Provide at least one of: --date/--time, --include, --exclude")
     try:
-        attributes: dict = {}
+        call = ctx.obj["call"]
+        view = _load(call, campaign_id)
+        result: dict = {"id": view["id"]}
 
-        # Handle send time
-        if date_val and time_val:
-            attributes["send_strategy"] = {
-                "method": "static",
-                "datetime": _parse_send_time(date_val, time_val),
-                "options": {
-                    "is_local": False,
-                },
-            }
-        elif date_val and not time_val:
-            raise click.UsageError("--date requires --time as well.")
-        elif time_val and not date_val:
-            raise click.UsageError("--time requires --date as well.")
+        if set_audiences:
+            included = [i.strip() for i in (include_ids or "").split(",") if i.strip()]
+            excluded = [i.strip() for i in (exclude_ids or "").split(",") if i.strip()]
+            aid = view["audience_id"] or _audience(call, view)["id"]
+            resp = call("PATCH", f"/api/campaign-audiences/{aid}/", body={"data": {
+                "type": "campaign-audience", "id": aid,
+                "attributes": {"definition": {"included": included, "excluded": excluded}},
+            }})
+            result["audience"] = resp.get("data")
 
-        # Handle audiences
-        if include_ids is not None or exclude_ids is not None:
-            included = (
-                [i.strip() for i in include_ids.split(",") if i.strip()]
-                if include_ids
-                else []
-            )
-            excluded = (
-                [i.strip() for i in exclude_ids.split(",") if i.strip()]
-                if exclude_ids
-                else []
-            )
-            attributes["audiences"] = {"included": included, "excluded": excluded}
-
-        if not attributes:
-            raise click.UsageError(
-                "Provide at least one of: --date/--time, --include, --exclude"
-            )
-
-        payload = {
-            "data": {
-                "type": "campaign",
-                "id": campaign_id,
-                "attributes": attributes,
-            }
-        }
-
-        data = ctx.obj["call"]("PATCH", f"/api/campaigns/{campaign_id}/", body=payload)
+        attrs = {"send_time": view["send_time"]}
+        if date_val:
+            # A draft's planned date has no field at 2026-10-15 (a send_time PATCH
+            # on a draft is silently dropped), so set it where it still exists.
+            resp = call("PATCH", f"/api/campaigns/{view['id']}/", body={"data": {
+                "type": "campaign", "id": view["id"],
+                "attributes": {"send_strategy": {
+                    "method": "static",
+                    "datetime": _parse_send_time(date_val, time_val),
+                    "options": {"is_local": False},
+                }},
+            }}, revision=LEGACY_REVISION)
+            attrs = (resp.get("data") or {}).get("attributes") or {}
+            result["campaign"] = resp.get("data")
 
         if use_json:
-            output(data, use_json=True)
+            output(result, use_json=True)
         else:
-            item = data.get("data", {})
-            attrs = item.get("attributes", {})
-            name = attrs.get("name")
-            if name:
-                print(f"Updated campaign: {name}")
-                print(f"  Send Time: {_send_time_label(attrs, unset='not set')}")
-            else:
-                print("Campaign updated.")
+            print(f"Updated campaign: {view['name'] or view['id']}")
+            print(f"  Send Time: {_send_time_label(attrs, unset='not set')}")
+            if set_audiences:
+                print(f"  Include: {include_ids or '(none)'}")
+                print(f"  Exclude: {exclude_ids or '(none)'}")
     except (AuthError, APIError) as e:
         raise click.ClickException(str(e))
 
@@ -259,13 +421,11 @@ def schedule(ctx, campaign_id):
     """Schedule a campaign for sending."""
     use_json = ctx.obj["json"]
     try:
-        payload = {
-            "data": {
-                "type": "campaign-send-job",
-                "id": campaign_id,
-            }
-        }
-        data = ctx.obj["call"]("POST", "/api/campaign-send-jobs/", body=payload)
+        call = ctx.obj["call"]
+        mid = _load(call, campaign_id)["id"]
+        # Sends at the draft's planned date, which only LEGACY_REVISION knows.
+        payload = {"data": {"type": "campaign-send-job", "id": mid}}
+        data = call("POST", "/api/campaign-send-jobs/", body=payload, revision=LEGACY_REVISION)
 
         if use_json:
             output(data, use_json=True)
@@ -275,7 +435,7 @@ def schedule(ctx, campaign_id):
                 raise click.ClickException(
                     f"Error scheduling campaign: {errors[0].get('detail', str(errors[0]))}"
                 )
-            print(f"Campaign {campaign_id} scheduled for sending.")
+            print(f"Campaign {mid} scheduled for sending.")
     except (AuthError, APIError) as e:
         raise click.ClickException(str(e))
 
@@ -383,37 +543,18 @@ def _print_campaign_detail(ctx, results, sort_by, top_n):
         if cid:
             campaign_ids.add(cid)
 
-    # Fetch campaign details (name, send_time, subject lines) via include
+    # Fetch each campaign's name, send date and subject. Report groupings key
+    # on the message ID, which is what _load takes.
     campaign_info = {}
     for cid in campaign_ids:
         try:
-            resp = ctx.obj["call"](
-                "GET",
-                f"/api/campaigns/{cid}/"
-                "?fields[campaign]=name,send_time,scheduled_at"
-                "&include=campaign-messages"
-                "&fields[campaign-message]=definition",
-            )
-            attrs = resp.get("data", {}).get("attributes", {})
-            send_time = attrs.get("send_time") or attrs.get("scheduled_at") or ""
-            send_date = send_time.split("T")[0] if send_time else ""
-            name = attrs.get("name", "")
-
-            # Get subject from first included message
-            subject = ""
-            preview = ""
-            for inc in resp.get("included", []):
-                if inc.get("type") == "campaign-message":
-                    content = inc.get("attributes", {}).get("definition", {}).get("content", {})
-                    subject = content.get("subject", "")
-                    preview = content.get("preview_text", "")
-                    break
-
+            view = _load(ctx.obj["call"], cid)
+            variation = view["variations"][0] if view["variations"] else {}
             campaign_info[cid] = {
-                "name": name,
-                "send_date": send_date,
-                "subject": subject,
-                "preview": preview,
+                "name": view["name"] or "",
+                "send_date": (view["send_time"] or "").split("T")[0],
+                "subject": variation.get("subject") or "",
+                "preview": variation.get("preview_text") or "",
             }
         except Exception:
             campaign_info[cid] = {"name": "", "send_date": "", "subject": "", "preview": ""}
@@ -472,6 +613,7 @@ def _print_campaign_detail(ctx, results, sort_by, top_n):
         print()
 
 
+
 # ---------------------------------------------------------------------------
 # get-creative
 # ---------------------------------------------------------------------------
@@ -486,32 +628,30 @@ def get_creative(ctx, campaign_id, show_html, grep_term):
     """Dump a campaign's creative (subject + text/HTML) via its template."""
     use_json = ctx.obj["json"]
     try:
-        msgs = ctx.obj["call"]("GET", f"/api/campaigns/{campaign_id}/campaign-messages/")
+        call = ctx.obj["call"]
+        view = _load(call, campaign_id)
         results = []
-        for m in msgs.get("data", []):
-            attrs = m.get("attributes", {})
-            content = (attrs.get("definition") or {}).get("content", {}) or {}
-            tpl = ((m.get("relationships", {}) or {}).get("template", {}) or {}).get("data")
+        for v in view["variations"]:
             html = text = None
-            if tpl:
-                tdata = ctx.obj["call"]("GET", f"/api/templates/{tpl['id']}/")
-                tattrs = tdata.get("data", {}).get("attributes", {})
+            if v.get("template_id"):
+                tattrs = call("GET", f"/api/templates/{v['template_id']}/").get("data", {}).get("attributes", {})
                 html = tattrs.get("html")
                 text = tattrs.get("text")
             results.append({
-                "message_id": m.get("id"),
-                "channel": attrs.get("channel"),
-                "subject": content.get("subject"),
-                "preview": content.get("preview_text"),
-                "template_id": tpl.get("id") if tpl else None,
-                "html": html, "text": text, "body": content.get("body"),
+                "message_id": view["id"],
+                "variation_id": v.get("id"),
+                "channel": v.get("channel"),
+                "subject": v.get("subject"),
+                "preview": v.get("preview_text"),
+                "template_id": v.get("template_id"),
+                "html": html, "text": text, "body": v.get("body"),
             })
 
         if use_json:
-            output({"campaign_id": campaign_id, "messages": results}, use_json=True)
+            output({"campaign_id": view["id"], "messages": results}, use_json=True)
             return
         if not results:
-            print("(no messages on this campaign)")
+            print("(no content on this campaign)")
             return
         for r in results:
             print(f"=== message {r['message_id']} ({r.get('channel') or '?'}) ===")
@@ -555,38 +695,42 @@ def clone_campaign(ctx, campaign_id, new_name):
 
     A clone carries the source's subject line, from address, and audiences
     along with the creative -- only the name changes. All three are printed so
-    they can be checked against the plan. The clone's template is
-    campaign-scoped (PATCH /api/templates/ on it fails), so edit the creative
-    with set-campaign-html.
+    they can be checked against the plan. Edit the creative with
+    set-campaign-html.
     """
     use_json = ctx.obj["json"]
     try:
         call = ctx.obj["call"]
-        payload = {"data": {"type": "campaign", "id": campaign_id,
-                            "attributes": {"new_name": new_name}}}
+        source = _load(call, campaign_id)
+        # The clone endpoint takes the container ID, not the message ID.
+        payload = {"data": {"type": "campaign", "id": source["campaign_id"],
+                            "attributes": {"name": new_name}}}
         created = call("POST", "/api/campaign-clone/", body=payload).get("data") or {}
-        new_id = created.get("id")
-        attrs = created.get("attributes") or {}
-        msgs = call("GET", f"/api/campaigns/{new_id}/campaign-messages/").get("data", [])
+        container = created.get("id")
+        msgs = call("GET", f"/api/campaigns/{container}/campaign-messages/").get("data", [])
+        clones = []
+        for m in msgs:
+            view = _get_message(call, m["id"])
+            view["audience"] = _audience(call, view)
+            clones.append(view)
 
         if use_json:
-            output({"campaign": created, "messages": msgs}, use_json=True)
+            output({"campaign": created, "messages": clones}, use_json=True)
             return
-        audiences = attrs.get("audiences") or {}
-        print(f"Cloned {campaign_id} -> {new_id}")
-        print(f"  Name: {attrs.get('name', new_name)}")
-        print(f"  Status: {attrs.get('status', '?')}")
+        new_ids = ", ".join(c["id"] for c in clones) or "(no messages)"
+        print(f"Cloned {campaign_id} -> {new_ids}")
+        print(f"  Name: {new_name}")
+        print(f"  Container campaign: {container}")
         print("  Inherited from the source (check against the plan):")
-        print(f"    Include: {', '.join(audiences.get('included') or []) or '(none)'}")
-        print(f"    Exclude: {', '.join(audiences.get('excluded') or []) or '(none)'}")
-        for m in msgs:
-            content = ((m.get("attributes") or {}).get("definition") or {}).get("content") or {}
-            tpl = (((m.get("relationships") or {}).get("template") or {}).get("data") or {}).get("id")
-            print(f"    Message {m.get('id')}: template {tpl or '(none)'}")
-            print(f"      Subject: {content.get('subject') or '(none)'}")
-            print(f"      From: {content.get('from_email') or '(none)'}")
-        print("  Edit the creative with set-campaign-html; the cloned template is "
-              "campaign-scoped and rejects direct template PATCHes.")
+        for c in clones:
+            print(f"    Campaign {c['id']} ({_status_label(c['status'])}):")
+            print(f"      Include: {', '.join(c['audience']['included']) or '(none)'}")
+            print(f"      Exclude: {', '.join(c['audience']['excluded']) or '(none)'}")
+            for v in c["variations"]:
+                print(f"      Template: {v.get('template_id') or '(none)'}")
+                print(f"      Subject: {v.get('subject') or '(none)'}")
+                print(f"      From: {v.get('from_email') or '(none)'}")
+        print("  Edit the creative with set-campaign-html.")
     except (AuthError, APIError) as e:
         raise click.ClickException(str(e))
 
@@ -594,24 +738,6 @@ def clone_campaign(ctx, campaign_id, new_name):
 # ---------------------------------------------------------------------------
 # patch-message
 # ---------------------------------------------------------------------------
-
-
-def _pick_message(call, campaign_id: str, message_id: str | None = None) -> dict:
-    """The campaign's only message, or the one matching message_id."""
-    msgs = call("GET", f"/api/campaigns/{campaign_id}/campaign-messages/").get("data", [])
-    if message_id:
-        for m in msgs:
-            if m.get("id") == message_id:
-                return m
-        raise click.ClickException(f"Message {message_id} not found on campaign {campaign_id}.")
-    if not msgs:
-        raise click.ClickException(f"Campaign {campaign_id} has no messages.")
-    if len(msgs) > 1:
-        ids = ", ".join(m.get("id", "?") for m in msgs)
-        raise click.ClickException(
-            f"Campaign {campaign_id} has {len(msgs)} messages ({ids}); pass --message-id."
-        )
-    return msgs[0]
 
 
 @main.command("patch-message")
@@ -626,11 +752,9 @@ def _pick_message(call, campaign_id: str, message_id: str | None = None) -> dict
 def patch_message(ctx, campaign_id, subject, preview, from_email, from_label, reply_to, message_id):
     """Change an email campaign's subject, preview text, or sender, keeping every other field.
 
-    Klaviyo replaces the message's whole content object on PATCH (and requires
-    channel + label), so a subject-only update that omits from_email silently
-    drops the from address. This reads the current content, merges your changes
-    in, sends it all back, then re-reads the message and fails if anything
-    didn't stick or changed that you didn't ask for.
+    The content lives on the message's variation. This patches only the fields
+    you pass, then re-reads the variation and fails if anything didn't stick
+    or changed that you didn't ask for.
     """
     use_json = ctx.obj["json"]
     changes = {k: v for k, v in {
@@ -643,35 +767,28 @@ def patch_message(ctx, campaign_id, subject, preview, from_email, from_label, re
         )
     try:
         call = ctx.obj["call"]
-        msg = _pick_message(call, campaign_id, message_id)
-        mid = msg["id"]
-        attrs = msg.get("attributes") or {}
-        definition = attrs.get("definition") or {}
-        channel = definition.get("channel") or attrs.get("channel")
-        if channel != "email":
+        view = _load(call, campaign_id, message_id)
+        before = _only_variation(view)
+        vid = before["id"]
+        if before.get("channel") != "email":
             raise click.ClickException(
-                f"Message {mid} is {channel or 'an unknown channel'}; patch-message handles email only."
+                f"Campaign {view['id']} is {before.get('channel') or 'an unknown channel'}; "
+                "patch-message handles email only."
             )
-        before = definition.get("content") or {}
-        content = {k: v for k, v in before.items() if v is not None}
-        content.update(changes)
-        payload = {"data": {"type": "campaign-message", "id": mid, "attributes": {"definition": {
-            "channel": channel,
-            "label": definition.get("label") or attrs.get("label"),
-            "content": content,
-        }}}}
-        call("PATCH", f"/api/campaign-messages/{mid}/", body=payload)
+        call("PATCH", f"/api/campaign-variations/{vid}/", body={"data": {
+            "type": "campaign-variation", "id": vid,
+            "attributes": {"definition": {"details": {"channel": "email", **changes}}},
+        }})
 
         # A 2xx isn't proof: re-read and compare.
-        fresh = (call("GET", f"/api/campaign-messages/{mid}/").get("data") or {}).get("attributes") or {}
-        after = (fresh.get("definition") or {}).get("content") or {}
+        after = _variation_details(call("GET", f"/api/campaign-variations/{vid}/").get("data") or {})
         not_applied = [k for k, v in changes.items() if after.get(k) != v]
         if not_applied:
             raise click.ClickException(
-                "Klaviyo accepted the update but the message still shows the old "
+                "Klaviyo accepted the update but the campaign still shows the old "
                 f"{', '.join(not_applied)}. Check the campaign in the Klaviyo UI."
             )
-        collateral = [k for k, v in content.items() if k not in changes and after.get(k) != v]
+        collateral = [k for k, v in before.items() if k not in changes and after.get(k) != v]
         if collateral:
             raise click.ClickException(
                 f"The update changed fields you didn't ask to change: {', '.join(collateral)}. "
@@ -679,10 +796,10 @@ def patch_message(ctx, campaign_id, subject, preview, from_email, from_label, re
             )
 
         if use_json:
-            output({"campaign_id": campaign_id, "message_id": mid,
+            output({"campaign_id": view["id"], "variation_id": vid,
                     "before": before, "after": after}, use_json=True)
         else:
-            print(f"Updated message {mid} on campaign {campaign_id} (verified):")
+            print(f"Updated campaign {view['id']} (verified):")
             for k in changes:
                 print(f"  {k}: {before.get(k)!r} -> {after.get(k)!r}")
             if "from_email" not in changes:
@@ -696,10 +813,6 @@ def patch_message(ctx, campaign_id, subject, preview, from_email, from_label, re
 # ---------------------------------------------------------------------------
 
 _IMG_SRC = re.compile(r'<img[^>]*\ssrc="([^"]+)"', re.IGNORECASE)
-
-
-def _template_id(message: dict) -> str | None:
-    return (((message.get("relationships") or {}).get("template") or {}).get("data") or {}).get("id")
 
 
 @main.command("set-campaign-html")
@@ -717,9 +830,8 @@ def _template_id(message: dict) -> str | None:
 def set_campaign_html(ctx, campaign_id, html_path, expect, forbid, message_id, keep_template):
     """Replace an email campaign's HTML creative and verify it took.
 
-    Assigning a template to a campaign message copies its HTML into the
-    message, so later edits to that template never reach the campaign, and a
-    cloned campaign's own template rejects PATCH. This creates a throwaway
+    Assigning a template to a campaign copies its HTML into the campaign, so
+    later edits to that template never reach it. This creates a throwaway
     library template from the file, assigns it, re-reads the live creative and
     checks it (every <img> URL from the file must be there, plus any --expect /
     --forbid text), then deletes the throwaway unless --keep-template.
@@ -729,48 +841,59 @@ def set_campaign_html(ctx, campaign_id, html_path, expect, forbid, message_id, k
         html = fh.read()
     try:
         call = ctx.obj["call"]
-        msg = _pick_message(call, campaign_id, message_id)
-        mid = msg["id"]
-        old_tpl = _template_id(msg)
+        view = _load(call, campaign_id, message_id)
+        variation = _only_variation(view)
+        vid = variation["id"]
+        old_tpl = variation.get("template_id")
+        if variation.get("channel") != "email":
+            raise click.ClickException(
+                f"Campaign {view['id']} is {variation.get('channel') or 'an unknown channel'}; "
+                "set-campaign-html handles email only."
+            )
 
         created = call("POST", "/api/templates/", body={"data": {"type": "template", "attributes": {
-            "name": f"klaviyo-cli set-campaign-html {campaign_id}",
+            "name": f"klaviyo-cli set-campaign-html {view['id']}",
             "editor_type": "CODE",
             "html": html,
         }}})
         tmp_id = (created.get("data") or {}).get("id")
-        call("POST", "/api/campaign-message-assign-template/", body={"data": {
-            "type": "campaign-message", "id": mid,
-            "relationships": {"template": {"data": {"type": "template", "id": tmp_id}}},
-        }})
+        try:
+            # Typed "campaign-message", but at 2026-10-15 it takes the VARIATION ID
+            # (a message ID fails with "A message with id ... does not exist").
+            call("POST", "/api/campaign-message-assign-template/", body={"data": {
+                "type": "campaign-message", "id": vid,
+                "relationships": {"template": {"data": {"type": "template", "id": tmp_id}}},
+            }})
 
-        live_tpl = _template_id(_pick_message(call, campaign_id, mid))
-        live_html = ((call("GET", f"/api/templates/{live_tpl}/").get("data") or {})
-                     .get("attributes") or {}).get("html") or ""
+            live_tpl = _variation_details(
+                call("GET", f"/api/campaign-variations/{vid}/").get("data") or {}).get("template_id")
+            live_html = ((call("GET", f"/api/templates/{live_tpl}/").get("data") or {})
+                         .get("attributes") or {}).get("html") or ""
 
-        images = _IMG_SRC.findall(html)
-        problems = []
-        if live_tpl == old_tpl:
-            problems.append(f"message still points at its old template {old_tpl}")
-        missing = [u for u in images if u not in live_html]
-        if missing:
-            problems.append("image URLs from your file are missing from the live creative: "
-                            + ", ".join(missing))
-        problems += [f"expected text not found: {t!r}" for t in expect if t not in live_html]
-        problems += [f"forbidden text still present: {t!r}" for t in forbid if t in live_html]
-
-        if tmp_id and not keep_template:
-            call("DELETE", f"/api/templates/{tmp_id}/")
+            images = _IMG_SRC.findall(html)
+            problems = []
+            if live_tpl == old_tpl:
+                problems.append(f"campaign still points at its old template {old_tpl}")
+            missing = [u for u in images if u not in live_html]
+            if missing:
+                problems.append("image URLs from your file are missing from the live creative: "
+                                + ", ".join(missing))
+            problems += [f"expected text not found: {t!r}" for t in expect if t not in live_html]
+            problems += [f"forbidden text still present: {t!r}" for t in forbid if t in live_html]
+        finally:
+            # Delete the throwaway even when assign or verify fails.
+            if tmp_id and not keep_template:
+                call("DELETE", f"/api/templates/{tmp_id}/")
         if problems:
             raise click.ClickException("Creative did not verify:\n  " + "\n  ".join(problems))
 
         if use_json:
-            output({"campaign_id": campaign_id, "message_id": mid, "live_template_id": live_tpl,
+            output({"campaign_id": view["id"], "variation_id": vid, "live_template_id": live_tpl,
                     "intermediate_template_id": tmp_id, "kept_intermediate": keep_template,
                     "checked": {"images": len(images), "expect": list(expect),
                                 "forbid": list(forbid)}}, use_json=True)
         else:
-            print(f"Creative replaced on campaign {campaign_id}, message {mid} (verified).")
+            print(f"Creative replaced on campaign {view['id']} (verified).")
             print(f"  Live template: {live_tpl}")
             print(f"  Checked: {len(images)} image URL(s), {len(expect)} --expect, "
                   f"{len(forbid)} --forbid")
@@ -788,7 +911,7 @@ def set_campaign_html(ctx, campaign_id, html_path, expect, forbid, message_id, k
 
 
 @main.command("list-campaigns")
-@click.option("--status", default=None, help="Filter by status (e.g. Sent, Draft, Scheduled)")
+@click.option("--status", default=None, help="Filter by status (draft, scheduled, sending, sent, cancelled)")
 @click.option("--channel", default="email", show_default=True,
               type=click.Choice(["email", "sms"]), help="Message channel")
 @click.option("--days", default=None, type=int, help="Created within the last N days")
@@ -799,29 +922,16 @@ def set_campaign_html(ctx, campaign_id, html_path, expect, forbid, message_id, k
 def list_campaigns(ctx, status, channel, days, since, until, limit):
     """List/filter campaigns by status, channel, and date (beyond name search)."""
     use_json = ctx.obj["json"]
+    filters = [_status_filter(status)] if status else []
+    if days is not None:
+        since_dt = datetime.now(ZoneInfo("UTC")) - timedelta(days=days)
+        filters.append(f"greater-than(created,{since_dt.strftime('%Y-%m-%dT%H:%M:%SZ')})")
+    if since:
+        filters.append(f"greater-than(created,{since}T00:00:00Z)")
+    if until:
+        filters.append(f"less-than(created,{until}T23:59:59Z)")
     try:
-        filters = [f"equals(messages.channel,'{channel}')"]
-        if status:
-            filters.append(f"equals(status,'{status}')")
-        if days is not None:
-            since_dt = datetime.now(ZoneInfo("UTC")) - timedelta(days=days)
-            filters.append(f"greater-than(created_at,{since_dt.strftime('%Y-%m-%dT%H:%M:%SZ')})")
-        if since:
-            filters.append(f"greater-than(created_at,{since}T00:00:00Z)")
-        if until:
-            filters.append(f"less-than(created_at,{until}T23:59:59Z)")
-        filter_str = "and(" + ",".join(filters) + ")" if len(filters) > 1 else filters[0]
-        encoded = urllib.parse.quote(filter_str)
-        path = (f"/api/campaigns/?filter={encoded}&sort=-created_at"
-                f"&fields[campaign]=name,status,send_time,created_at")
-
-        campaigns: list = []
-        while path and len(campaigns) < limit:
-            data = ctx.obj["call"]("GET", path)
-            campaigns.extend(data.get("data", []))
-            next_link = data.get("links", {}).get("next")
-            path = next_link.replace(KLAVIYO_BASE, "") if next_link else None
-        campaigns = campaigns[:limit]
+        campaigns = _list_messages(ctx.obj["call"], filters, channel, limit)
 
         if use_json:
             output({"data": campaigns}, use_json=True)
@@ -829,10 +939,10 @@ def list_campaigns(ctx, status, channel, days, since, until, limit):
             scope = f"channel={channel}" + (f", status={status}" if status else "")
             print(f"Campaigns for {ctx.obj['label']} ({scope}) — {len(campaigns)} shown:")
             for c in campaigns:
-                a = c.get("attributes", {})
+                a = c["attributes"]
                 st = a.get("send_time")
                 when = (f"send {st.split('T')[0]}" if st
                         else f"created {(a.get('created_at') or '').split('T')[0]}")
-                print(f"  [{c['id']}] {a.get('status', '?'):10} {a.get('name', '?')}  ({when})")
+                print(f"  [{c['id']}] {a['status']:10} {a.get('name') or '?'}  ({when})")
     except (AuthError, APIError) as e:
         raise click.ClickException(str(e))

@@ -1,13 +1,13 @@
 """delete: remove a segment, list, campaign, flow, or form after explicit confirmation."""
 
 import sys
-import urllib.parse
 
 import click
 
 from .._util import output
 from ..cli import main
 from ..transport import APIError, AuthError, KLAVIYO_BASE, confirmed_delete
+from .campaigns import _audience, _list_messages, _load, _status_label
 from .forms import FORMS_REVISION, _form_status
 
 # type -> (API collection, fields to show)
@@ -47,15 +47,26 @@ def _flows_referencing(call, object_id):
 
 def _unsent_campaigns_referencing(call, object_id):
     hits = []
-    for channel in ("email", "sms"):
-        for status in ("Draft", "Scheduled"):
-            filt = urllib.parse.quote(
-                f"and(equals(messages.channel,'{channel}'),equals(status,'{status}'))")
-            for c in _paginate(call, f"/api/campaigns/?filter={filt}&fields[campaign]=name,status,audiences"):
-                attrs = c.get("attributes", {})
-                if object_id in str(attrs.get("audiences") or {}):
-                    hits.append(f"{channel} campaign [{c['id']}] {attrs.get('name', '?')} ({status})")
+    for status in ("draft", "scheduled"):
+        for row in _list_messages(call, [f"equals(status,'{status}')"]):
+            audience = _audience(call, {"id": row["id"], "audience_id": row["audience_id"]})
+            if object_id in audience["included"] + audience["excluded"]:
+                attrs = row["attributes"]
+                hits.append(f"{attrs['channel'] or '?'} campaign [{row['id']}] "
+                            f"{attrs['name'] or '?'} ({attrs['status']})")
     return hits
+
+
+def _campaign_target(call, campaign_id):
+    """(path, name, attrs) for deleting a campaign by message or container ID.
+    A container holding just this message goes whole; otherwise only the message."""
+    view = _load(call, campaign_id)
+    siblings = call("GET", f"/api/campaigns/{view['campaign_id']}/campaign-messages/").get("data", [])
+    if len(siblings) <= 1:
+        path = f"/api/campaigns/{view['campaign_id']}/"
+    else:
+        path = f"/api/campaign-messages/{view['id']}/"
+    return path, view["name"] or "?", {"status": _status_label(view["status"])}
 
 
 @main.command("delete")
@@ -75,13 +86,16 @@ def delete(ctx, object_type, object_id, confirm_id):
     path = f"/api/{TYPES[object_type]}/{object_id}/"
     revision = REVISIONS.get(object_type)
     try:
-        extra = "?additional-fields[{0}]=profile_count".format(object_type) \
-            if object_type in ("segment", "list") else ""
-        data = call("GET", path + extra, revision=revision).get("data", {})
-        attrs = data.get("attributes", {})
-        name = attrs.get("name", "?")
-        if object_type == "form":
-            attrs = {**attrs, "status": _form_status(data)}
+        if object_type == "campaign":
+            path, name, attrs = _campaign_target(call, object_id)
+        else:
+            extra = "?additional-fields[{0}]=profile_count".format(object_type) \
+                if object_type in ("segment", "list") else ""
+            data = call("GET", path + extra, revision=revision).get("data", {})
+            attrs = data.get("attributes", {})
+            name = attrs.get("name", "?")
+            if object_type == "form":
+                attrs = {**attrs, "status": _form_status(data)}
 
         click.echo(f"About to PERMANENTLY delete {object_type} [{object_id}] {name}", err=True)
         if attrs.get("status"):

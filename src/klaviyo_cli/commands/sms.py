@@ -5,6 +5,7 @@ import click
 from .._util import _parse_send_time, output
 from ..cli import main
 from ..transport import APIError, AuthError
+from .campaigns import LEGACY_REVISION
 
 # ---------------------------------------------------------------------------
 # upload-sms
@@ -85,7 +86,10 @@ def upload_sms(ctx, name, body_text, date_val, time_val, include_ids, exclude_id
             }
         }
 
-        data = ctx.obj["call"]("POST", "/api/campaigns/", body=payload)
+        # Created at LEGACY_REVISION: the new campaign model has no field for an
+        # unscheduled draft's send date. The returned ID is the message ID that
+        # every other command takes.
+        data = ctx.obj["call"]("POST", "/api/campaigns/", body=payload, revision=LEGACY_REVISION)
 
         if use_json:
             output(data, use_json=True)

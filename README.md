@@ -50,6 +50,9 @@ Run `klaviyo --help` for the full command list.
 Run `klaviyo COMMAND --help` for full options on any command.
 
 ### Campaigns
+
+Uses API revision `2026-10-15`, where a campaign is a container of messages and the subject, sender and template live on each message's content variation. The ID a campaign shows in the Klaviyo UI (and in reporting) is its **message** ID, so that's the ID every command prints and takes. A container campaign ID also works when the container holds one message. A draft's planned send date has no field at `2026-10-15`, so `patch-campaign --date`, `upload-sms` and `schedule` (and the planned date `get-campaign` shows) use revision `2026-07-15`.
+
 | Command | Description |
 |---|---|
 | `list-campaigns` | List/filter campaigns by status, channel, and date (beyond name search) |
@@ -58,8 +61,8 @@ Run `klaviyo COMMAND --help` for full options on any command.
 | `get-creative` | Dump a campaign's creative (subject + text/HTML) via its template |
 | `list-drafts` | List draft email campaigns for a client |
 | `patch-campaign` | Update campaign send time and/or audiences |
-| `patch-message` | Change subject, preview text or sender without dropping the other fields (Klaviyo replaces the whole content object); verifies after |
-| `clone-campaign` | Duplicate a campaign into a new draft and print what it inherited (subject, from address, audiences) plus message/template ids |
+| `patch-message` | Change subject, preview text or sender; re-reads the campaign and fails if the change didn't stick or touched another field |
+| `clone-campaign` | Duplicate a campaign into a new draft and print what it inherited (subject, from address, audiences) plus the new campaign and template IDs |
 | `set-campaign-html` | Replace a campaign's HTML from a file and verify the live creative (`--expect`/`--forbid` text checks) |
 | `schedule` | Schedule a campaign for sending |
 | `campaign-performance` | Show campaign revenue and engagement metrics |

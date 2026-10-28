@@ -217,3 +217,32 @@ def test_form_performance_without_form_flags_keeps_monthly_totals(mock_build):
     assert result.exit_code == 0, result.output
     assert "last 30 days" in result.output
     assert all(p != "/api/form-values-reports/" for _, p, _ in calls)
+
+
+def _sent(mid, name, send_time):
+    return {"id": mid, "attributes": {"created": "2026-09-01T00:00:00+00:00", "definition": {
+        "name": name, "status": "sent", "send_options": {"send_time": send_time}}},
+        "relationships": {"campaign-variations": {"data": [{"id": "V" + mid}]}}}
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_metrics_trims_to_the_send_window_newest_first(mock_build):
+    """Messages can't be filtered by send time, so the query is status=sent +
+    updated>=start and the window is applied to send_time locally. A campaign
+    updated in the window but sent before it must not show."""
+    page = {
+        "data": [_sent("OLD", "Sent before window", "2026-08-15T14:00:00+00:00"),
+                 _sent("A", "First", "2026-09-05T14:00:00+00:00"),
+                 _sent("B", "Second", "2026-09-20T14:00:00+00:00")],
+        "included": [{"type": "campaign-variation", "id": v,
+                      "attributes": {"definition": {"details": {"channel": "email"}}}}
+                     for v in ("VOLD", "VA", "VB")],
+        "links": {"next": None},
+    }
+    ctx_obj, calls = _fake_ctx_factory([page])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["metrics", "--since", "2026-09-01", "--until", "2026-09-30"])
+    assert result.exit_code == 0, result.output
+    assert "Sent before window" not in result.output
+    assert result.output.index("Second") < result.output.index("First")
+    assert "greater-or-equal%28updated" in calls[0][1]

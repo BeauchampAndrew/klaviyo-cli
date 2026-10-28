@@ -8,7 +8,7 @@ from contextvars import ContextVar
 import requests
 
 KLAVIYO_BASE = "https://a.klaviyo.com"
-DEFAULT_REVISION = "2026-07-15"
+DEFAULT_REVISION = "2026-10-15"
 
 
 class APIError(Exception):
@@ -29,7 +29,7 @@ DELETE_ALLOWED_PATHS = [
 ]
 
 CONFIRMABLE_DELETE_PATHS = re.compile(
-    r"^/api/(segments|lists|campaigns|flows|forms)/([A-Za-z0-9_-]+)/?$"
+    r"^/api/(segments|lists|campaigns|campaign-messages|flows|forms)/([A-Za-z0-9_-]+)/?$"
 )
 
 _confirmed_delete: ContextVar[str | None] = ContextVar("_confirmed_delete", default=None)
