@@ -441,6 +441,104 @@ def schedule(ctx, campaign_id):
 
 
 # ---------------------------------------------------------------------------
+# unschedule / reschedule
+# ---------------------------------------------------------------------------
+
+
+def _revert_to_draft(call, message_id: str) -> None:
+    # "revert" puts a scheduled campaign back to Draft and keeps its planned
+    # date. The other action, "cancel", is final: a cancelled campaign can
+    # never be scheduled again, so this CLI doesn't offer it.
+    call("PATCH", f"/api/campaign-message-schedule/{message_id}/", body={"data": {
+        "type": "campaign-message-schedule", "id": message_id,
+        "attributes": {"action": "revert"},
+    }})
+
+
+@main.command("unschedule")
+@click.argument("campaign_id")
+@click.pass_context
+def unschedule(ctx, campaign_id):
+    """Take a scheduled campaign back to Draft. Its planned send time is kept."""
+    use_json = ctx.obj["json"]
+    try:
+        call = ctx.obj["call"]
+        view = _load(call, campaign_id)
+        if view["status"] != "scheduled":
+            raise click.ClickException(
+                f"Campaign {view['id']} is {_status_label(view['status'])}, not Scheduled.")
+        _revert_to_draft(call, view["id"])
+        after = _get_message(call, view["id"])
+        if after["status"] != "draft":
+            raise click.ClickException(
+                f"Klaviyo accepted the request but the campaign is {_status_label(after['status'])}. "
+                "Check it in the Klaviyo UI.")
+        if use_json:
+            output({"id": view["id"], "status": "Draft", "planned_send_time": view["send_time"]},
+                   use_json=True)
+        else:
+            print(f"Unscheduled {view['name'] or view['id']} (now Draft).")
+            print(f"  Planned send time kept: {view['send_time']}")
+            print(f"  To send at that time again: klaviyo schedule {view['id']}")
+    except (AuthError, APIError) as e:
+        raise click.ClickException(str(e))
+
+
+@main.command("reschedule")
+@click.argument("campaign_id")
+@click.option("--date", "date_val", required=True, help="New send date (MM-DD-YYYY)")
+@click.option("--time", "time_val", required=True, help="New send time (e.g. '3:00 PM EST')")
+@click.pass_context
+def reschedule(ctx, campaign_id, date_val, time_val):
+    """Move a scheduled (or draft) campaign to a new send time and schedule it.
+
+    Klaviyo can't move a scheduled send directly: this takes it back to Draft,
+    sets the new time, schedules it again, and checks the result.
+    """
+    use_json = ctx.obj["json"]
+    new_time = _parse_send_time(date_val, time_val)
+    if datetime.fromisoformat(new_time) <= datetime.now(ZoneInfo("UTC")):
+        raise click.UsageError(f"{new_time} is in the past; scheduling it would send right away.")
+    try:
+        call = ctx.obj["call"]
+        view = _load(call, campaign_id)
+        if view["status"] not in ("scheduled", "draft"):
+            raise click.ClickException(
+                f"Campaign {view['id']} is {_status_label(view['status'])}; only Scheduled or "
+                "Draft campaigns can be rescheduled.")
+        old_time = view["send_time"]
+        if view["status"] == "scheduled":
+            _revert_to_draft(call, view["id"])
+        call("PATCH", f"/api/campaigns/{view['id']}/", body={"data": {
+            "type": "campaign", "id": view["id"],
+            "attributes": {"send_strategy": {"method": "static", "datetime": new_time,
+                                             "options": {"is_local": False}}},
+        }}, revision=LEGACY_REVISION)
+        try:
+            call("POST", "/api/campaign-send-jobs/",
+                 body={"data": {"type": "campaign-send-job", "id": view["id"]}},
+                 revision=LEGACY_REVISION)
+        except APIError as e:
+            raise click.ClickException(
+                f"Campaign {view['id']} is back in Draft with the new time, but scheduling it "
+                f"failed: {e}. Fix that, then run: klaviyo schedule {view['id']}")
+        after = _get_message(call, view["id"])
+        if after["status"] != "scheduled":
+            raise click.ClickException(
+                f"Campaign {view['id']} is {_status_label(after['status'])} after rescheduling. "
+                "Check it in the Klaviyo UI.")
+        if use_json:
+            output({"id": view["id"], "status": "Scheduled", "old_send_time": old_time,
+                    "send_time": after["send_time"]}, use_json=True)
+        else:
+            print(f"Rescheduled {view['name'] or view['id']} (verified).")
+            print(f"  Was: {old_time or 'not scheduled'}")
+            print(f"  Now: {after['send_time']}")
+    except (AuthError, APIError) as e:
+        raise click.ClickException(str(e))
+
+
+# ---------------------------------------------------------------------------
 # campaign-performance
 # ---------------------------------------------------------------------------
 

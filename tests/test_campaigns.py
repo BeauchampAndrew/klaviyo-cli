@@ -25,6 +25,8 @@ def _api(routes):
         calls.append((method, path, body, revision))
         for (m, prefix), resp in routes:
             if m == method and path.startswith(prefix):
+                if isinstance(resp, list):  # successive responses, last one repeats
+                    resp = resp.pop(0) if len(resp) > 1 else resp[0]
                 if isinstance(resp, Exception):
                     raise resp
                 return resp
@@ -591,3 +593,86 @@ def test_search_query_with_apostrophe_uses_double_quotes(mock_build):
     result = CliRunner().invoke(main, ["search-campaigns", "Valentine's"])
     assert result.exit_code == 0, result.output
     assert "contains%28name%2C%22Valentine%27s%22%29" in calls[0][1]
+
+
+# ---------------------------------------------------------------------------
+# unschedule / reschedule
+# ---------------------------------------------------------------------------
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_unschedule_reverts_never_cancels(mock_build):
+    """'cancel' is final (a cancelled campaign can't be scheduled or deleted),
+    so unschedule only ever sends 'revert'."""
+    ctx_obj, calls = _api([
+        (("GET", "/api/campaign-messages/MSG1/"), [
+            _message(status="scheduled", send_time="2027-03-01T15:00:00+00:00"),
+            _message(status="draft")]),
+        (("PATCH", "/api/campaign-message-schedule/MSG1/"), {}),
+    ])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["unschedule", "MSG1"])
+    assert result.exit_code == 0, result.output
+    patch_call = next(c for c in calls if c[0] == "PATCH")
+    assert patch_call[2]["data"]["attributes"] == {"action": "revert"}
+    assert "2027-03-01T15:00:00+00:00" in result.output
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_unschedule_refuses_a_draft(mock_build):
+    ctx_obj, calls = _api([(("GET", "/api/campaign-messages/MSG1/"), _message(status="draft"))])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["unschedule", "MSG1"])
+    assert result.exit_code != 0
+    assert "not Scheduled" in result.output
+    assert all(c[0] == "GET" for c in calls)
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_reschedule_reverts_sets_time_schedules_and_verifies(mock_build):
+    ctx_obj, calls = _api([
+        (("GET", "/api/campaign-messages/MSG1/"), [
+            _message(status="scheduled", send_time="2027-03-01T15:00:00+00:00"),
+            _message(status="scheduled", send_time="2027-03-08T16:30:00+00:00")]),
+        (("PATCH", "/api/campaign-message-schedule/MSG1/"), {}),
+        (("PATCH", "/api/campaigns/MSG1/"), {}),
+        (("POST", "/api/campaign-send-jobs/"), {}),
+    ])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["reschedule", "MSG1", "--date", "03-08-2027",
+                                       "--time", "11:30 AM EST"])
+    assert result.exit_code == 0, result.output
+    order = [(c[0], c[1]) for c in calls if c[0] != "GET"]
+    assert order == [("PATCH", "/api/campaign-message-schedule/MSG1/"),
+                     ("PATCH", "/api/campaigns/MSG1/"),
+                     ("POST", "/api/campaign-send-jobs/")]
+    date_patch = calls[[c[1] for c in calls].index("/api/campaigns/MSG1/")]
+    assert date_patch[2]["data"]["attributes"]["send_strategy"]["datetime"] == "2027-03-08T11:30:00-05:00"
+    assert date_patch[3] == LEGACY_REVISION
+    assert "Now: 2027-03-08T16:30:00+00:00" in result.output
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_reschedule_refuses_past_time_before_any_call(mock_build):
+    ctx_obj, calls = _api([])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["reschedule", "MSG1", "--date", "01-01-2020", "--time", "9:00 AM EST"])
+    assert result.exit_code != 0
+    assert "in the past" in result.output
+    assert calls == []
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_reschedule_says_what_state_it_left_when_scheduling_fails(mock_build):
+    ctx_obj, _ = _api([
+        (("GET", "/api/campaign-messages/MSG1/"), _message(status="scheduled",
+                                                           send_time="2027-03-01T15:00:00+00:00")),
+        (("PATCH", "/api/campaign-message-schedule/MSG1/"), {}),
+        (("PATCH", "/api/campaigns/MSG1/"), {}),
+        (("POST", "/api/campaign-send-jobs/"), APIError("audience is empty")),
+    ])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["reschedule", "MSG1", "--date", "03-08-2027", "--time", "9:00 AM EST"])
+    assert result.exit_code != 0
+    assert "back in Draft with the new time" in result.output
+    assert "klaviyo schedule MSG1" in result.output

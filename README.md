@@ -65,6 +65,9 @@ Uses API revision `2026-10-15`, where a campaign is a container of messages and 
 | `clone-campaign` | Duplicate a campaign into a new draft and print what it inherited (subject, from address, audiences) plus the new campaign and template IDs |
 | `set-campaign-html` | Replace a campaign's HTML from a file and verify the live creative (`--expect`/`--forbid` text checks) |
 | `schedule` | Schedule a campaign for sending |
+| `unschedule` | Take a scheduled campaign back to Draft, keeping its planned send time (never cancels: a cancelled campaign can't be rescheduled or deleted) |
+| `reschedule` | Move a scheduled or draft campaign to a new send time and schedule it; refuses past times and verifies the result |
+| `test-send` | Email a test of a campaign, flow email(s) (`--flow ID --email 1,3` or `all`, numbered as in `flow-detail`), or template (`--template`) to up to 5 addresses per batch. `--as-profile` fills merge tags from a real profile. Arrives as "<subject line> Preview" from Klaviyo Preview Mailer; Klaviyo allows 100 a day per account |
 | `campaign-performance` | Show campaign revenue and engagement metrics |
 | `metrics` | Show sent campaigns for a client within a date window |
 
