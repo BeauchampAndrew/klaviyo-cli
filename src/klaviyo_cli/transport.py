@@ -8,7 +8,7 @@ from contextvars import ContextVar
 import requests
 
 KLAVIYO_BASE = "https://a.klaviyo.com"
-DEFAULT_REVISION = "2025-07-15"
+DEFAULT_REVISION = "2026-07-15"
 
 
 class APIError(Exception):

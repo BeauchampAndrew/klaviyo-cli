@@ -9,6 +9,11 @@ from .._util import _find_placed_order_metric, _norm_name, _resolve_date_range, 
 from ..cli import main
 from ..transport import APIError, AuthError, KLAVIYO_BASE
 
+# Flow actions/messages switched to a definition-based shape at 2025-10-15
+# (no more action_type/status/settings or message content). These reads
+# parse the old shape, so pin them until they're ported.
+FLOW_ACTIONS_REVISION = "2025-07-15"
+
 # ---------------------------------------------------------------------------
 # flows
 # ---------------------------------------------------------------------------
@@ -181,7 +186,7 @@ def flow_detail(ctx, flow_id):
         actions = []
         path = f"/api/flows/{flow_id}/flow-actions/?fields[flow-action]=action_type,status,settings"
         while path:
-            data = ctx.obj["call"]("GET", path)
+            data = ctx.obj["call"]("GET", path, revision=FLOW_ACTIONS_REVISION)
             actions.extend(data.get("data", []))
             next_link = data.get("links", {}).get("next")
             path = next_link.replace(KLAVIYO_BASE, "") if next_link else None
@@ -191,7 +196,8 @@ def flow_detail(ctx, flow_id):
         for a in actions:
             if a["attributes"]["action_type"] == "SEND_EMAIL":
                 _time.sleep(0.1)
-                msg_resp = ctx.obj["call"]("GET", f"/api/flow-actions/{a['id']}/flow-messages/")
+                msg_resp = ctx.obj["call"]("GET", f"/api/flow-actions/{a['id']}/flow-messages/",
+                                           revision=FLOW_ACTIONS_REVISION)
                 for m in msg_resp.get("data", []):
                     content = m.get("attributes", {}).get("content", {})
                     messages[a["id"]] = {
@@ -704,7 +710,7 @@ def flow_actions(ctx, flow_id):
         path = (f"/api/flows/{flow_id}/flow-actions/"
                 "?fields[flow-action]=action_type,status,created,updated&page[size]=50")
         while path:
-            data = ctx.obj["call"]("GET", path)
+            data = ctx.obj["call"]("GET", path, revision=FLOW_ACTIONS_REVISION)
             actions.extend(data.get("data", []))
             next_link = data.get("links", {}).get("next")
             path = next_link.replace(KLAVIYO_BASE, "") if next_link else None

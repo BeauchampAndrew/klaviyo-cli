@@ -26,7 +26,7 @@ def test_direct_get_sends_auth_headers(mock_get):
     assert out == {"data": []}
     headers = mock_get.call_args.kwargs["headers"]
     assert headers["Authorization"] == "Klaviyo-API-Key pk_test"
-    assert headers["revision"] == "2025-07-15"
+    assert headers["revision"] == "2026-07-15"
 
 
 @patch("klaviyo_cli.transport.requests.get")
