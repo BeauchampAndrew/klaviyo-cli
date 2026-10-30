@@ -1,4 +1,4 @@
-"""Segment/list commands: list-audiences, sizes, counts, get, search, create."""
+"""Segment/list commands: list-audiences, sizes, counts, get, search, create, update."""
 
 import json as json_module
 
@@ -260,6 +260,28 @@ def search_segments(ctx, keyword):
 # ---------------------------------------------------------------------------
 
 
+def _parse_definition(body_arg):
+    """Read a definition from JSON or @file: the bare definition,
+    {definition: ...}, or a full {data: {attributes: {definition}}} envelope."""
+    if body_arg.startswith("@"):
+        with open(body_arg[1:]) as f:
+            parsed = json_module.load(f)
+    else:
+        parsed = json_module.loads(body_arg)
+    if isinstance(parsed, dict) and "data" in parsed:
+        definition = (parsed["data"].get("attributes") or {}).get("definition") or {}
+    elif isinstance(parsed, dict) and "definition" in parsed:
+        definition = parsed["definition"]
+    else:
+        definition = parsed
+    if not isinstance(definition, dict) or "condition_groups" not in definition:
+        raise click.ClickException(
+            "Body must contain a 'condition_groups' definition (directly, "
+            "under 'definition', or in a full data envelope)."
+        )
+    return definition
+
+
 @main.command("create-segment")
 @click.option("--name", required=True, help="Segment name")
 @click.option("--body", "body_arg", required=True,
@@ -270,24 +292,7 @@ def create_segment(ctx, name, body_arg, force):
     """Create a segment from a definition, guarding against duplicates."""
     use_json = ctx.obj["json"]
     try:
-        if body_arg.startswith("@"):
-            with open(body_arg[1:]) as f:
-                parsed = json_module.load(f)
-        else:
-            parsed = json_module.loads(body_arg)
-
-        # Accept: the definition itself, {definition: ...}, or a full {data: {attributes: {definition}}}
-        if isinstance(parsed, dict) and "data" in parsed:
-            definition = (parsed["data"].get("attributes") or {}).get("definition") or {}
-        elif isinstance(parsed, dict) and "definition" in parsed:
-            definition = parsed["definition"]
-        else:
-            definition = parsed
-        if not isinstance(definition, dict) or "condition_groups" not in definition:
-            raise click.ClickException(
-                "Body must contain a 'condition_groups' definition (directly, "
-                "under 'definition', or in a full data envelope)."
-            )
+        definition = _parse_definition(body_arg)
 
         # Dedup guard — fetch existing names.
         existing: list = []
@@ -325,5 +330,84 @@ def create_segment(ctx, name, body_arg, force):
         else:
             print(f"Created segment [{new.get('id', '?')}] "
                   f"{new.get('attributes', {}).get('name', name)}")
+    except (AuthError, APIError) as e:
+        raise click.ClickException(str(e))
+
+
+# ---------------------------------------------------------------------------
+# update-segment (rename and/or replace the definition, verified)
+# ---------------------------------------------------------------------------
+
+
+def _strip_nulls(value):
+    """Drop null-valued keys so a hand-written definition compares equal to
+    Klaviyo's read-back, which fills omitted optional fields with null."""
+    if isinstance(value, dict):
+        return {k: _strip_nulls(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [_strip_nulls(v) for v in value]
+    return value
+
+
+@main.command("update-segment")
+@click.argument("segment_id")
+@click.option("--name", help="New segment name")
+@click.option("--body", "body_arg",
+              help="Replacement definition JSON ({condition_groups:[...]}, {definition}, "
+                   "or full data envelope), or @file.json. Replaces the whole definition.")
+@click.option("--dry-run", is_flag=True, help="Show before/after without saving")
+@click.pass_context
+def update_segment(ctx, segment_id, name, body_arg, dry_run):
+    """Rename a segment and/or replace its definition, then verify.
+
+    Prints the current and new rules. Tip: start from `get-segment <id> --json`,
+    edit the definition, pass it back with --body. Profiles that newly match
+    the edited rules count as joining, so segment-triggered flows fire for them.
+    """
+    if not name and not body_arg:
+        raise click.ClickException("Nothing to change: pass --name and/or --body.")
+    use_json = ctx.obj["json"]
+    try:
+        attrs = {}
+        if name:
+            attrs["name"] = name
+        if body_arg:
+            attrs["definition"] = _parse_definition(body_arg)
+
+        current = ctx.obj["call"]("GET", f"/api/segments/{segment_id}/")
+        cur_attrs = current.get("data", {}).get("attributes", {})
+        if not use_json:
+            print(f"Segment [{segment_id}] {cur_attrs.get('name', '?')}")
+            if name:
+                print(f"  Name:   {cur_attrs.get('name', '?')!r} -> {name!r}")
+            if body_arg:
+                metric_map = _resolve_metrics(ctx.obj["call"])
+                before = _render_definition(cur_attrs.get("definition") or {}, metric_map, oneline=True)
+                after = _render_definition(attrs["definition"], metric_map, oneline=True)
+                print(f"  Before: {before or '(no rule conditions)'}")
+                print(f"  After:  {after or '(no rule conditions)'}")
+        if dry_run:
+            if not use_json:
+                print("Dry run: nothing saved.")
+            return
+
+        payload = {"data": {"type": "segment", "id": segment_id, "attributes": attrs}}
+        ctx.obj["call"]("PATCH", f"/api/segments/{segment_id}/", body=payload)
+
+        # Verify from a fresh read, not the PATCH echo.
+        saved = ctx.obj["call"]("GET", f"/api/segments/{segment_id}/")
+        saved_attrs = saved.get("data", {}).get("attributes", {})
+        if name and saved_attrs.get("name") != name:
+            raise click.ClickException(
+                f"Klaviyo accepted the update but the name reads back as "
+                f"{saved_attrs.get('name')!r}. Check the segment in the UI.")
+        if body_arg and _strip_nulls(saved_attrs.get("definition")) != _strip_nulls(attrs["definition"]):
+            raise click.ClickException(
+                "Klaviyo accepted the update but the definition reads back "
+                "differently. Check it with get-segment.")
+        if use_json:
+            output(saved, use_json=True)
+        else:
+            print("Saved (verified). The profile count recalculates over the next few minutes.")
     except (AuthError, APIError) as e:
         raise click.ClickException(str(e))

@@ -134,3 +134,80 @@ def test_get_segment_renders_negative_consent(mock_build):
     assert result.exit_code == 0, result.output
     assert "can NOT receive email marketing (suppressed or no consent)" in result.output
     assert "2. can receive email marketing" in result.output
+
+
+_SEG_CURRENT = {
+    "data": {"id": "SEG1", "attributes": {
+        "name": "Old Name",
+        "definition": {"condition_groups": [{"conditions": [{
+            "type": "profile-metric", "metric_id": "TY5Ysg", "measurement": "count",
+            "measurement_filter": {"type": "numeric", "operator": "greater-than", "value": 0},
+            "timeframe_filter": {"type": "date", "operator": "alltime"},
+        }]}]},
+    }}
+}
+
+
+def _seg(name, definition):
+    return {"data": {"id": "SEG1", "attributes": {"name": name, "definition": definition}}}
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_update_segment_definition_patches_and_verifies(mock_build):
+    new_def = {"condition_groups": [{"conditions": [{
+        "type": "profile-metric", "metric_id": "TY5Ysg", "measurement": "count",
+        "measurement_filter": {"type": "numeric", "operator": "greater-than", "value": 0},
+        "timeframe_filter": {"type": "date", "operator": "in-the-last", "unit": "day", "quantity": 7},
+    }]}]}
+    # Read-back carries an extra null field; verification must still pass.
+    read_back = {"condition_groups": [{"conditions": [
+        {**new_def["condition_groups"][0]["conditions"][0], "metric_filters": None}]}]}
+    ctx_obj, calls = _fake_ctx_factory([
+        _SEG_CURRENT, _METRICS_PAGE, {"data": {}}, _seg("Old Name", read_back)])
+    mock_build.return_value = ctx_obj
+    import json
+    result = CliRunner().invoke(main, ["update-segment", "SEG1", "--body", json.dumps(new_def)])
+    assert result.exit_code == 0, result.output
+    assert "Before: Opened Email >0" in result.output
+    assert "in last 7d" in result.output
+    patch_call = [c for c in calls if c[0] == "PATCH"][0]
+    assert patch_call[1] == "/api/segments/SEG1/"
+    assert patch_call[2]["data"]["attributes"] == {"definition": new_def}
+    assert "Saved (verified)" in result.output
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_update_segment_rename_only(mock_build):
+    ctx_obj, calls = _fake_ctx_factory([
+        _SEG_CURRENT, {"data": {}}, _seg("New Name", _SEG_CURRENT["data"]["attributes"]["definition"])])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["update-segment", "SEG1", "--name", "New Name"])
+    assert result.exit_code == 0, result.output
+    patch_call = [c for c in calls if c[0] == "PATCH"][0]
+    assert patch_call[2]["data"]["attributes"] == {"name": "New Name"}
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_update_segment_dry_run_does_not_patch(mock_build):
+    ctx_obj, calls = _fake_ctx_factory([_SEG_CURRENT])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["update-segment", "SEG1", "--name", "New Name", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "Dry run" in result.output
+    assert not [c for c in calls if c[0] == "PATCH"]
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_update_segment_flags_mismatched_read_back(mock_build):
+    ctx_obj, calls = _fake_ctx_factory([
+        _SEG_CURRENT, {"data": {}}, _seg("Old Name", _SEG_CURRENT["data"]["attributes"]["definition"])])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["update-segment", "SEG1", "--name", "New Name"])
+    assert result.exit_code != 0
+    assert "reads back" in result.output
+
+
+def test_update_segment_requires_a_change():
+    result = CliRunner().invoke(main, ["update-segment", "SEG1"])
+    assert result.exit_code != 0
+    assert "Nothing to change" in result.output

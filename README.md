@@ -81,6 +81,7 @@ Uses API revision `2026-10-15`, where a campaign is a container of messages and 
 | `segment-sizes` | Show all segments with profile counts |
 | `list-sizes` | Show all lists with profile counts, newest first |
 | `create-segment` | Create a segment from a definition, guarding against duplicates |
+| `update-segment` | Rename a segment and/or replace its definition (before/after preview, `--dry-run`, verified read-back) |
 
 ### Flows
 | Command | Description |
