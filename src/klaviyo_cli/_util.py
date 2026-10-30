@@ -167,8 +167,45 @@ def _format_condition(cond: dict, metric_map: dict) -> str:
         if tf.get("operator") == "in-the-last":
             unit = _WINDOW_UNIT.get(tf.get("unit"), tf.get("unit", ""))
             window = f" in last {tf.get('quantity')}{unit}"
-        return f"{name} {op}{val}{window}"
+        elif tf.get("operator") == "alltime":
+            window = " over all time"
+        elif tf.get("operator"):
+            parts = [str(tf[k]) for k in ("value", "start", "end", "quantity", "unit") if tf.get(k) is not None]
+            window = f" {tf['operator']}{' ' + ' '.join(parts) if parts else ''}"
+        return f"{name} {op}{val}{window}{_format_metric_filters(cond.get('metric_filters'))}"
     return t or "?"
+
+
+_FILTER_PREVIEW = 3
+
+
+def _format_metric_filters(metric_filters) -> str:
+    """' where Collections contains-any [A, B, C, +99 more]' for event-property
+    filters on a metric condition; '' when there are none."""
+    parts = []
+    for mf in metric_filters or []:
+        f = mf.get("filter") or {}
+        val = f.get("value")
+        if isinstance(val, list):
+            shown = ", ".join(str(v) for v in val[:_FILTER_PREVIEW])
+            more = f", +{len(val) - _FILTER_PREVIEW} more" if len(val) > _FILTER_PREVIEW else ""
+            val = f"[{shown}{more}]"
+        parts.append(f"{mf.get('property', '?')} {f.get('operator', '?')}"
+                     f"{'' if val is None else ' ' + str(val)}")
+    return f" where {' AND '.join(parts)}" if parts else ""
+
+
+def _filter_values(definition: dict) -> set:
+    """Every metric-filter value in a definition, for before/after diffs."""
+    out = set()
+    for g in (definition or {}).get("condition_groups", []):
+        for c in g.get("conditions", []):
+            for mf in c.get("metric_filters") or []:
+                val = (mf.get("filter") or {}).get("value")
+                for v in val if isinstance(val, list) else [val]:
+                    if v is not None:
+                        out.add(f"{mf.get('property', '?')}: {v}")
+    return out
 
 
 def _render_definition(definition: dict, metric_map: dict, oneline: bool = False):

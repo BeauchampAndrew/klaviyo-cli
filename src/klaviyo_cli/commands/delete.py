@@ -1,6 +1,8 @@
-"""delete: remove a segment, list, campaign, flow, or form after explicit confirmation."""
+"""delete: remove a segment, list, campaign, flow, or form after explicit confirmation.
+segment-usage: the same "what uses it" scan on its own, read-only."""
 
 import sys
+from datetime import datetime, timedelta, timezone
 
 import click
 
@@ -45,16 +47,84 @@ def _flows_referencing(call, object_id):
     return hits
 
 
-def _unsent_campaigns_referencing(call, object_id):
+def _broken(e: Exception) -> bool:
+    return "broken state" in str(e).lower()
+
+
+def _iso(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _messages_skipping_broken(call, status, skipped):
+    """Campaign messages with this status. One message Klaviyo reports as being
+    "in a broken state" fails every page it lands on, so on that error the
+    created-date range is split in half until the bad message sits alone in a
+    one-minute window; that window is noted in `skipped` and the rest is read."""
+    base = f"equals(status,'{status}')"
+    try:
+        return _list_messages(call, [base])
+    except APIError as e:
+        if not _broken(e):
+            raise
+    rows = []
+    windows = [(datetime(2012, 1, 1, tzinfo=timezone.utc),
+                datetime.now(timezone.utc) + timedelta(days=1))]
+    while windows:
+        lo, hi = windows.pop()
+        try:
+            rows.extend(_list_messages(
+                call, [base, f"greater-or-equal(created,{_iso(lo)})", f"less-than(created,{_iso(hi)})"]))
+        except APIError as e:
+            if not _broken(e):
+                raise
+            if hi - lo <= timedelta(minutes=1):
+                skipped.append(f"{status} campaign created between {lo:%Y-%m-%d %H:%M} and "
+                               f"{hi:%Y-%m-%d %H:%M} UTC (Klaviyo: broken state, unreadable)")
+                continue
+            mid = lo + (hi - lo) / 2
+            windows += [(lo, mid), (mid, hi)]
+    return rows
+
+
+def _unsent_campaigns_referencing(call, object_id, skipped=None):
+    """Draft/scheduled campaigns whose audiences include or exclude the ID.
+    Campaigns that can't be read are added to `skipped` instead of aborting."""
+    skipped = [] if skipped is None else skipped
     hits = []
     for status in ("draft", "scheduled"):
-        for row in _list_messages(call, [f"equals(status,'{status}')"]):
-            audience = _audience(call, {"id": row["id"], "audience_id": row["audience_id"]})
+        for row in _messages_skipping_broken(call, status, skipped):
+            attrs = row["attributes"]
+            label = f"{attrs['channel'] or '?'} campaign [{row['id']}] {attrs['name'] or '?'} ({attrs['status']})"
+            try:
+                audience = _audience(call, {"id": row["id"], "audience_id": row["audience_id"]})
+            except APIError as e:
+                skipped.append(f"{label}: audience unreadable ({e})")
+                continue
             if object_id in audience["included"] + audience["excluded"]:
-                attrs = row["attributes"]
-                hits.append(f"{attrs['channel'] or '?'} campaign [{row['id']}] "
-                            f"{attrs['name'] or '?'} ({attrs['status']})")
+                hits.append(label)
     return hits
+
+
+def _usage(call, object_id):
+    """(uses, skipped) across all flows and unsent campaigns."""
+    skipped: list = []
+    uses = _flows_referencing(call, object_id) + _unsent_campaigns_referencing(call, object_id, skipped)
+    return uses, skipped
+
+
+def _echo_usage(uses, skipped, deleting=True):
+    if uses:
+        click.echo(f"  ⚠ Still in use by {len(uses)} flow(s)/campaign(s):", err=True)
+        for u in uses:
+            click.echo(f"      {u}", err=True)
+        if deleting:
+            click.echo("    A flow triggered by it stops getting new entries.", err=True)
+    else:
+        click.echo("  Not used by any flow or draft/scheduled campaign.", err=True)
+    if skipped:
+        click.echo(f"  ⚠ Could not check {len(skipped)} campaign(s); check these by hand:", err=True)
+        for s in skipped:
+            click.echo(f"      {s}", err=True)
 
 
 def _campaign_target(call, campaign_id):
@@ -110,14 +180,7 @@ def delete(ctx, object_type, object_id, confirm_id):
             click.echo("  ⚠ Live form: it comes off the site, and its reporting goes with it.", err=True)
 
         if object_type in ("segment", "list"):
-            uses = _flows_referencing(call, object_id) + _unsent_campaigns_referencing(call, object_id)
-            if uses:
-                click.echo(f"  ⚠ Still in use by {len(uses)} flow(s)/campaign(s):", err=True)
-                for u in uses:
-                    click.echo(f"      {u}", err=True)
-                click.echo("    A flow triggered by it stops getting new entries.", err=True)
-            else:
-                click.echo("  Not used by any flow or draft/scheduled campaign.", err=True)
+            _echo_usage(*_usage(call, object_id))
 
         if confirm_id is None:
             if not sys.stdin.isatty():
@@ -134,5 +197,26 @@ def delete(ctx, object_type, object_id, confirm_id):
             output(result, use_json=True)
         else:
             print(f"Deleted {object_type} [{object_id}] {name}")
+    except (AuthError, APIError) as e:
+        raise click.ClickException(str(e))
+
+
+@main.command("segment-usage")
+@click.argument("object_id")
+@click.pass_context
+def segment_usage(ctx, object_id):
+    """List every flow and draft/scheduled campaign that uses a segment or list.
+
+    Checks flow triggers, filters and splits, and campaign include/exclude
+    audiences. Read-only; run it before editing or deleting an audience.
+    """
+    call = ctx.obj["call"]
+    try:
+        uses, skipped = _usage(call, object_id)
+        if ctx.obj["json"]:
+            output({"id": object_id, "used_by": uses, "unchecked": skipped}, use_json=True)
+            return
+        click.echo(f"Usage of [{object_id}] in {ctx.obj['label']}:", err=True)
+        _echo_usage(uses, skipped, deleting=False)
     except (AuthError, APIError) as e:
         raise click.ClickException(str(e))

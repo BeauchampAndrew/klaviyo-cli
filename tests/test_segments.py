@@ -211,3 +211,38 @@ def test_update_segment_requires_a_change():
     result = CliRunner().invoke(main, ["update-segment", "SEG1"])
     assert result.exit_code != 0
     assert "Nothing to change" in result.output
+
+
+def test_render_shows_metric_filters_and_alltime():
+    from klaviyo_cli._util import _render_definition
+    definition = {"condition_groups": [{"conditions": [{
+        "type": "profile-metric", "metric_id": "PO1", "measurement": "count",
+        "measurement_filter": {"type": "numeric", "operator": "greater-than", "value": 0},
+        "timeframe_filter": {"type": "date", "operator": "alltime"},
+        "metric_filters": [{"property": "Collections", "filter": {
+            "type": "list", "operator": "contains-any", "value": ["A", "B", "C", "D", "E"]}}],
+    }]}]}
+    out = _render_definition(definition, {"PO1": {"name": "Placed Order"}}, oneline=True)
+    assert out == "Placed Order >0 over all time where Collections contains-any [A, B, C, +2 more]"
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_update_segment_lists_added_and_removed_filter_values(mock_build):
+    import json
+
+    def seg_def(values):
+        return {"condition_groups": [{"conditions": [{
+            "type": "profile-metric", "metric_id": "TY5Ysg", "measurement": "count",
+            "measurement_filter": {"type": "numeric", "operator": "greater-than", "value": 0},
+            "timeframe_filter": {"type": "date", "operator": "alltime"},
+            "metric_filters": [{"property": "Collections",
+                                "filter": {"type": "list", "operator": "contains-any", "value": values}}],
+        }]}]}
+
+    ctx_obj, calls = _fake_ctx_factory([_seg("S", seg_def(["A", "B"])), _METRICS_PAGE])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["update-segment", "SEG1", "--body",
+                                       json.dumps(seg_def(["B", "C"])), "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "+ Collections: C" in result.output
+    assert "- Collections: A" in result.output

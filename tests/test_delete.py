@@ -146,3 +146,79 @@ def test_delete_form_uses_forms_revision_and_warns_when_live(mock_build):
     assert "Live form" in result.output
     assert ("DELETE", "/api/forms/F1/", FORMS_REVISION) in calls
     assert all(r == FORMS_REVISION for _, _, r in calls)
+
+
+def _broken_ctx():
+    """Draft list: one readable message (created 2025-03-01) and one that
+    Klaviyo reports as broken (created 2024-06-01), which fails any page it's on."""
+    import re
+    import urllib.parse
+    from klaviyo_cli.transport import APIError
+
+    good, bad = "2025-03-01T00:00:00Z", "2024-06-01T00:00:00Z"
+    calls = []
+
+    def in_window(f, ts):
+        lo = re.search(r"greater-or-equal\(created,([^)]+)\)", f)
+        hi = re.search(r"less-than\(created,([^)]+)\)", f)
+        return (not lo or lo.group(1) <= ts) and (not hi or ts < hi.group(1))
+
+    def call(method, path, body=None, revision=None):
+        calls.append((method, path))
+        if path.startswith("/api/flows/?"):
+            return {"data": []}
+        if path.startswith("/api/campaign-messages/?"):
+            f = urllib.parse.unquote(path)
+            if "'scheduled'" in f:
+                return {"data": []}
+            if in_window(f, bad):
+                raise APIError("Campaign message is in a broken state.")
+            data = []
+            if in_window(f, good):
+                data = [{"id": "C1", "attributes": {"definition": {"name": "Promo", "status": "draft"}},
+                         "relationships": {"campaign-audience": {"data": {"id": "AUD1"}}}}]
+            return {"data": data}
+        if path.startswith("/api/campaign-audiences/AUD1/"):
+            return {"data": {"id": "AUD1", "attributes": {"definition": {"included": ["SEG1"]}}}}
+        raise AssertionError(path)
+
+    return {"call": call, "label": "t", "json": False}, calls
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_segment_usage_routes_around_a_broken_campaign(mock_build):
+    ctx, calls = _broken_ctx()
+    mock_build.return_value = ctx
+    result = CliRunner().invoke(main, ["segment-usage", "SEG1"])
+    assert result.exit_code == 0, result.output
+    assert "campaign [C1] Promo (Draft)" in result.output
+    assert "Could not check 1 campaign(s)" in result.output
+    assert "2024-06-01" in result.output
+    assert not [c for c in calls if c[0] != "GET"]
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_delete_segment_no_longer_aborts_on_a_broken_campaign(mock_build):
+    ctx, _ = _broken_ctx()
+    real_call = ctx["call"]
+
+    def call(method, path, body=None, revision=None):
+        if path.startswith("/api/segments/SEG1/"):
+            return {"data": {"attributes": {"name": "Old Seg", "profile_count": 12}}}
+        return real_call(method, path, body, revision)
+
+    ctx["call"] = call
+    mock_build.return_value = ctx
+    result = CliRunner().invoke(main, ["delete", "segment", "SEG1"])
+    assert "campaign [C1] Promo (Draft)" in result.output
+    assert "Could not check 1 campaign(s)" in result.output
+    assert "Not deleted" in result.output
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_segment_usage_reports_flow_trigger(mock_build):
+    ctx, _ = _ctx(flow_def={"triggers": [{"type": "segment", "id": "SEG1"}]})
+    mock_build.return_value = ctx
+    result = CliRunner().invoke(main, ["segment-usage", "SEG1"])
+    assert result.exit_code == 0, result.output
+    assert "flow [FL1] Push (live)" in result.output

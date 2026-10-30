@@ -82,6 +82,7 @@ Uses API revision `2026-10-15`, where a campaign is a container of messages and 
 | `list-sizes` | Show all lists with profile counts, newest first |
 | `create-segment` | Create a segment from a definition, guarding against duplicates |
 | `update-segment` | Rename a segment and/or replace its definition (before/after preview, `--dry-run`, verified read-back) |
+| `segment-usage` | Every flow and draft/scheduled campaign that uses a segment or list (routes around campaigns Klaviyo reports as broken) |
 
 ### Flows
 | Command | Description |

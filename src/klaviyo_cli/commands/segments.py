@@ -4,7 +4,7 @@ import json as json_module
 
 import click
 
-from .._util import _norm_name, _render_definition, _resolve_metrics, output
+from .._util import _filter_values, _norm_name, _render_definition, _resolve_metrics, output
 from ..cli import main
 from ..transport import APIError, AuthError, KLAVIYO_BASE
 
@@ -386,6 +386,12 @@ def update_segment(ctx, segment_id, name, body_arg, dry_run):
                 after = _render_definition(attrs["definition"], metric_map, oneline=True)
                 print(f"  Before: {before or '(no rule conditions)'}")
                 print(f"  After:  {after or '(no rule conditions)'}")
+                old_vals = _filter_values(cur_attrs.get("definition") or {})
+                new_vals = _filter_values(attrs["definition"])
+                for v in sorted(new_vals - old_vals):
+                    print(f"    + {v}")
+                for v in sorted(old_vals - new_vals):
+                    print(f"    - {v}")
         if dry_run:
             if not use_json:
                 print("Dry run: nothing saved.")
