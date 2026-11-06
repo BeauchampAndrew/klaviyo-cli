@@ -99,6 +99,7 @@ Uses API revision `2026-10-15`, where a campaign is a container of messages and 
 | `flow-add-email` | Insert an email (created in Draft, sends nothing until switched live); `--copy N` starts from another email's settings and template, `--subject`/`--preview`/`--name`/`--template` override |
 | `flow-remove-step` | Remove message N (`--message`) or the delay before it (`--delay-before`); asks first unless `--yes` |
 | `flow-edit-message` | Change a flow message's text on draft or live flows: an SMS body (`--body`, `--body @file`, `--replace OLD NEW`, updates the RCS/SMS versions too) or an email's `--subject`/`--preview`/`--from-label`/`--from-email`; `--dry-run` shows before/after; read back to verify |
+| `flow-set-status` | Set a flow `live`/`manual`/`draft`; `--all-messages` or `--message N` switches messages too (messages before the flow when going live, flow first when pausing); `--messages-only`, `--dry-run`; asks before going live unless `--yes`; verified read-back |
 
 Delays are always live, so adding, changing, or removing one in a live flow affects profiles already in it; those commands refuse a live flow without `--live-ok`. Klaviyo can't insert conditional/trigger splits or A/B tests, and trigger and profile filters can't be edited through the API at all. Inserts aren't idempotent, so each command reads the flow back instead of retrying.
 

@@ -435,3 +435,102 @@ def flow_edit_message(ctx, flow_id, message_num, body, pairs, subject, preview, 
         print("Saved and verified." + (" Live: the next send uses it." if data.get("status") == "live" else ""))
     except (AuthError, APIError) as e:
         raise click.ClickException(str(e))
+
+
+STATUSES = ("live", "manual", "draft")
+
+
+def _set_action_status(call, action: dict, status: str) -> None:
+    definition = {k: v for k, v in action.items() if k in ("id", "type", "links", "data")}
+    definition["data"] = {**(action.get("data") or {}), "status": status}
+    call("PATCH", f"/api/flow-actions/{action['id']}/", body={"data": {
+        "type": "flow-action", "id": str(action["id"]), "attributes": {"definition": definition}}})
+
+
+@main.command("flow-set-status")
+@click.argument("flow_id")
+@click.argument("status", type=click.Choice(STATUSES))
+@click.option("--message", "message_nums", type=int, multiple=True,
+              help="Also set message N (repeatable, numbered as in flow-detail)")
+@click.option("--all-messages", is_flag=True, help="Also set every email and SMS in the flow")
+@click.option("--messages-only", is_flag=True, help="Change only the messages, leave the flow's status")
+@click.option("--dry-run", is_flag=True, help="Show what would change without saving")
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt when going live")
+@click.pass_context
+def flow_set_status(ctx, flow_id, status, message_nums, all_messages, messages_only, dry_run, yes):
+    """Set a flow live, manual or draft, and optionally its messages too.
+
+    \b
+      klaviyo flow-set-status RDNDw6 live --all-messages      # every message, then the flow
+      klaviyo flow-set-status RDNDw6 live --message 3 --messages-only
+      klaviyo flow-set-status RDNDw6 draft                    # pause the whole flow
+      klaviyo flow-set-status RDNDw6 manual --message 2 --messages-only
+
+    A live flow only sends messages that are themselves live, so a new flow
+    usually needs --all-messages. Going live asks first unless --yes.
+    Turning a flow off stops profiles already waiting in it.
+    """
+    if messages_only and not (message_nums or all_messages):
+        raise click.UsageError("--messages-only needs --message N or --all-messages.")
+    if message_nums and all_messages:
+        raise click.UsageError("Give --message N or --all-messages, not both.")
+    try:
+        call = ctx.obj["call"]
+        flow = _load_flow(call, flow_id)
+        steps = _message_steps(flow["definition"])
+        nums = [n for n, _ in steps] if all_messages else list(message_nums)
+        targets = [(n, _message(flow, n)) for n in nums]
+        to_change = [(n, a) for n, a in targets if (a.get("data") or {}).get("status") != status]
+        flow_change = not messages_only and flow["status"] != status
+
+        plan = [f"  {_label(a, n)}: {(a.get('data') or {}).get('status')} -> {status}" for n, a in to_change]
+        if flow_change:
+            plan.append(f"  Flow: {flow['status']} -> {status}")
+        if not plan:
+            raise click.ClickException(f"{flow['name']} is already {status}"
+                                       + (" with those messages." if targets else ".") + " Nothing changed.")
+        if ctx.obj["json"] and dry_run:
+            output({"flow_id": flow_id, "dry_run": True, "status": status, "flow": flow_change,
+                    "messages": [a["id"] for _, a in to_change]}, use_json=True)
+            return
+        if not ctx.obj["json"]:
+            print(f"{flow['name']} ({flow_id}):")
+            print("\n".join(plan))
+            if status == "live" and flow_change and not targets:
+                drafts = [n for n, a in steps if (a.get("data") or {}).get("status") != "live"]
+                if drafts:
+                    print(f"  Note: messages {', '.join(map(str, drafts))} aren't live and won't send "
+                          "(add --all-messages to switch them too).")
+        if dry_run:
+            print("Dry run, nothing saved.")
+            return
+        if status == "live" and not yes and not click.confirm("Go live? Real profiles will start getting these."):
+            raise click.ClickException("Nothing changed.")
+
+        def set_flow():
+            call("PATCH", f"/api/flows/{flow_id}/", body={"data": {
+                "type": "flow", "id": flow_id, "attributes": {"status": status}}})
+
+        # Going live: messages first so the flow never runs with drafts. Pausing: flow first.
+        if flow_change and status != "live":
+            set_flow()
+        for _, action in to_change:
+            _set_action_status(call, action, status)
+        if flow_change and status == "live":
+            set_flow()
+
+        after = _load_flow(call, flow_id)
+        by_id = {str(a.get("id")): a for a in after["definition"].get("actions", [])}
+        wrong = [_label(a, n) for n, a in to_change
+                 if ((by_id.get(str(a["id"])) or {}).get("data") or {}).get("status") != status]
+        if flow_change and after["status"] != status:
+            wrong.append(f"the flow (still {after['status']})")
+        if wrong:
+            raise click.ClickException(f"Klaviyo didn't keep: {'; '.join(wrong)}. Check flow-actions {flow_id}.")
+        if ctx.obj["json"]:
+            output({"flow_id": flow_id, "status": status, "flow": after["status"],
+                    "messages": [a["id"] for _, a in to_change]}, use_json=True)
+            return
+        print(f"Saved and verified. Flow is {after['status']}.")
+    except (AuthError, APIError) as e:
+        raise click.ClickException(str(e))

@@ -234,3 +234,64 @@ def test_edit_wrong_option_for_message_type():
     result, _ = _run([(("GET", "/api/flows/F1/"), _sms_flow("x"))],
                      "flow-edit-message", "F1", "--message", "2", "--subject", "x")
     assert result.exit_code != 0 and "is SMS" in result.output
+
+
+def _status_flow(flow_status, msg_status):
+    f = _flow(flow_status)
+    for a in f["data"]["attributes"]["definition"]["actions"]:
+        if a["type"] == "send-email":
+            a["data"]["status"] = msg_status
+    return f
+
+
+def test_set_status_live_all_messages_then_flow_in_order():
+    routes = [(("GET", "/api/flows/F1/"), [_status_flow("draft", "draft"), _status_flow("live", "live")]),
+              (("PATCH", "/api/flow-actions/e1/"), {"data": {}}),
+              (("PATCH", "/api/flow-actions/e2/"), {"data": {}}),
+              (("PATCH", "/api/flows/F1/"), {"data": {}})]
+    result, calls = _run(routes, "flow-set-status", "F1", "live", "--all-messages", "--yes")
+    assert result.exit_code == 0, result.output
+    patches = [c[1] for c in calls if c[0] == "PATCH"]
+    assert patches[-1].startswith("/api/flows/F1")  # flow goes live last
+    defn = next(c[2] for c in calls if c[0] == "PATCH" and "flow-actions" in c[1])["data"]["attributes"]["definition"]
+    assert defn["data"]["status"] == "live" and defn["data"]["message"]["subject_line"] == "Subj"
+    assert "Saved and verified" in result.output
+
+
+def test_set_status_draft_pauses_flow_first():
+    routes = [(("GET", "/api/flows/F1/"), [_status_flow("live", "live"), _status_flow("draft", "draft")]),
+              (("PATCH", "/api/flow-actions/e1/"), {"data": {}}),
+              (("PATCH", "/api/flow-actions/e2/"), {"data": {}}),
+              (("PATCH", "/api/flows/F1/"), {"data": {}})]
+    result, calls = _run(routes, "flow-set-status", "F1", "draft", "--all-messages")
+    assert result.exit_code == 0, result.output
+    assert [c[1] for c in calls if c[0] == "PATCH"][0].startswith("/api/flows/F1")
+
+
+def test_set_status_live_asks_first_and_dry_run_saves_nothing():
+    routes = [(("GET", "/api/flows/F1/"), _status_flow("draft", "draft"))]
+    result, calls = _run(routes, "flow-set-status", "F1", "live", "--all-messages", stdin="n\n")
+    assert result.exit_code != 0 and "Nothing changed" in result.output
+    assert not [c for c in calls if c[0] == "PATCH"]
+    result, calls = _run(routes, "flow-set-status", "F1", "live", "--all-messages", "--dry-run")
+    assert result.exit_code == 0 and "Dry run" in result.output
+    assert not [c for c in calls if c[0] == "PATCH"]
+
+
+def test_set_status_warns_when_flow_goes_live_with_draft_messages():
+    routes = [(("GET", "/api/flows/F1/"), _status_flow("draft", "draft"))]
+    result, _ = _run(routes, "flow-set-status", "F1", "live", "--dry-run")
+    assert "won't send" in result.output
+
+
+def test_set_status_flags_what_klaviyo_did_not_keep():
+    routes = [(("GET", "/api/flows/F1/"), [_status_flow("draft", "draft"), _status_flow("draft", "draft")]),
+              (("PATCH", "/api/flows/F1/"), {"data": {}})]
+    result, _ = _run(routes, "flow-set-status", "F1", "live", "--yes")
+    assert result.exit_code != 0 and "didn't keep" in result.output
+
+
+def test_set_status_nothing_to_do():
+    result, _ = _run([(("GET", "/api/flows/F1/"), _status_flow("live", "live"))],
+                     "flow-set-status", "F1", "live", "--all-messages")
+    assert result.exit_code != 0 and "already live" in result.output
