@@ -149,3 +149,88 @@ def test_remove_delay_deletes_through_the_confirmation_gate():
 def test_flow_action_deletes_are_blocked_outside_the_command():
     with pytest.raises(AuthError):
         ensure_delete_allowed("/api/flow-actions/d1/")
+
+
+def _sms(aid, body, status="live"):
+    return {"id": aid, "type": "send-sms", "links": {"next": None},
+            "data": {"status": status, "message": {"name": "SMS", "body": body, "add_org_prefix": True,
+                                                    "message_hierarchy": [
+                                                        {"message": body, "message_format": "RCS", "extra": {}},
+                                                        {"message": body, "message_format": "SMS", "extra": {}}]}}}
+
+
+def _sms_flow(body, status="live"):
+    email = _email("e1", "EM1", "s1")
+    return _flow(status, [email, _sms("s1", body)])
+
+
+def _patch(calls):
+    return next(c[2]["data"]["attributes"]["definition"] for c in calls if c[0] == "PATCH")
+
+
+def test_edit_sms_replace_updates_body_and_every_version_then_verifies():
+    old, new = "expire on 2026-11-26. Go", "expire soon. Go"
+    routes = [(("GET", "/api/flows/F1/"), [_sms_flow(old), _sms_flow(new)]),
+              (("PATCH", "/api/flow-actions/s1/"), {"data": {}})]
+    result, calls = _run(routes, "flow-edit-message", "F1", "--message", "2", "--replace", "on 2026-11-26", "soon")
+    assert result.exit_code == 0, result.output
+    msg = _patch(calls)["data"]["message"]
+    assert msg["body"] == new
+    assert [h["message"] for h in msg["message_hierarchy"]] == [new, new]
+    assert msg["add_org_prefix"] is True  # other settings kept
+    assert _patch(calls)["data"]["status"] == "live"
+    assert "Saved and verified" in result.output
+
+
+def test_edit_sms_body_from_file(tmp_path):
+    f = tmp_path / "sms.txt"
+    f.write_text("Brand new text\n")
+    routes = [(("GET", "/api/flows/F1/"), [_sms_flow("Old"), _sms_flow("Brand new text")]),
+              (("PATCH", "/api/flow-actions/s1/"), {"data": {}})]
+    result, calls = _run(routes, "flow-edit-message", "F1", "--message", "2", "--body", f"@{f}")
+    assert result.exit_code == 0, result.output
+    assert _patch(calls)["data"]["message"]["body"] == "Brand new text"
+
+
+def test_edit_dry_run_saves_nothing():
+    routes = [(("GET", "/api/flows/F1/"), _sms_flow("Hello there"))]
+    result, calls = _run(routes, "flow-edit-message", "F1", "--message", "2", "--replace", "there", "you", "--dry-run")
+    assert result.exit_code == 0, result.output
+    assert "Hello you" in result.output and "Dry run" in result.output
+    assert not [c for c in calls if c[0] == "PATCH"]
+
+
+def test_edit_replace_missing_text_fails_without_saving():
+    routes = [(("GET", "/api/flows/F1/"), _sms_flow("Hello"))]
+    result, calls = _run(routes, "flow-edit-message", "F1", "--message", "2", "--replace", "nope", "x")
+    assert result.exit_code != 0 and "isn't in the SMS body" in result.output
+    assert not [c for c in calls if c[0] == "PATCH"]
+
+
+def test_edit_fails_loudly_if_klaviyo_does_not_keep_it():
+    routes = [(("GET", "/api/flows/F1/"), [_sms_flow("Old"), _sms_flow("Old")]),
+              (("PATCH", "/api/flow-actions/s1/"), {"data": {}})]
+    result, _ = _run(routes, "flow-edit-message", "F1", "--message", "2", "--body", "New")
+    assert result.exit_code != 0 and "didn't keep body" in result.output
+
+
+def test_edit_email_subject_and_preview():
+    after = _flow()
+    after["data"]["attributes"]["definition"]["actions"][0]["data"]["message"].update(
+        {"subject_line": "Last chance", "preview_text": "Ends tonight"})
+    routes = [(("GET", "/api/flows/F1/"), [_flow(), after]),
+              (("PATCH", "/api/flow-actions/e1/"), {"data": {}})]
+    result, calls = _run(routes, "flow-edit-message", "F1", "--message", "1",
+                         "--subject", "Last chance", "--preview", "Ends tonight")
+    assert result.exit_code == 0, result.output
+    msg = _patch(calls)["data"]["message"]
+    assert msg["subject_line"] == "Last chance" and msg["preview_text"] == "Ends tonight"
+    assert msg["template_id"] == "Te1"
+
+
+def test_edit_wrong_option_for_message_type():
+    result, _ = _run([(("GET", "/api/flows/F1/"), _flow())], "flow-edit-message", "F1", "--message", "1", "--body", "x")
+    assert result.exit_code != 0 and "edit-template" in result.output
+    result, _ = _run([(("GET", "/api/flows/F1/"), _sms_flow("x"))],
+                     "flow-edit-message", "F1", "--message", "2", "--subject", "x")
+    assert result.exit_code != 0 and "is SMS" in result.output
