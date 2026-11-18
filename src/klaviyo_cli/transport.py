@@ -32,6 +32,10 @@ CONFIRMABLE_DELETE_PATHS = re.compile(
     r"^/api/(segments|lists|campaigns|campaign-messages|flows|flow-actions|forms)/([A-Za-z0-9_-]+)/?$"
 )
 
+# Taking profiles off a list. The profiles themselves are kept. Opened by
+# `list-remove` after it shows who comes off and gets a yes.
+LIST_MEMBERS_DELETE_PATH = re.compile(r"^/api/lists/([A-Za-z0-9_-]+)/relationships/profiles/?$")
+
 _confirmed_delete: ContextVar[str | None] = ContextVar("_confirmed_delete", default=None)
 
 
@@ -49,7 +53,8 @@ def confirmed_delete(path: str):
 def ensure_delete_allowed(path: str) -> None:
     if any(p.match(path) for p in DELETE_ALLOWED_PATHS):
         return
-    if CONFIRMABLE_DELETE_PATHS.match(path) and _confirmed_delete.get() == path:
+    if (CONFIRMABLE_DELETE_PATHS.match(path) or LIST_MEMBERS_DELETE_PATH.match(path)) \
+            and _confirmed_delete.get() == path:
         return
     raise AuthError(
         f"DELETE on {path} is not allowed here. Delete segments, lists, "
@@ -126,7 +131,8 @@ class DirectTransport:
         elif method == "PUT":
             send = lambda: requests.put(url, headers=headers, json=body, timeout=30)  # noqa: E731
         elif method == "DELETE":
-            send = lambda: requests.delete(url, headers=headers, timeout=30)  # noqa: E731
+            # Relationship deletes (e.g. list members) carry a JSON body.
+            send = lambda: requests.delete(url, headers=headers, json=body, timeout=30)  # noqa: E731
         else:
             raise AuthError(f"Unsupported HTTP method: {method}")
         return self._with_429_retry(send)
