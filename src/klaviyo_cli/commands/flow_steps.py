@@ -18,6 +18,7 @@ import click
 from .._util import output
 from ..cli import main
 from ..transport import APIError, AuthError, confirmed_delete
+from .campaigns import TEMPLATE_READ_REVISION
 from .test_send import _message_steps
 
 MESSAGE_FIELDS = ("name", "from_email", "from_label", "reply_to_email", "cc_email", "bcc_email",
@@ -433,6 +434,95 @@ def flow_edit_message(ctx, flow_id, message_num, body, pairs, subject, preview, 
                     "changes": {k: {"before": a, "after": b} for k, (a, b) in changes.items()}}, use_json=True)
             return
         print("Saved and verified." + (" Live: the next send uses it." if data.get("status") == "live" else ""))
+    except (AuthError, APIError) as e:
+        raise click.ClickException(str(e))
+
+
+EDITOR_NAMES = {"CODE": "HTML", "SYSTEM_DRAGGABLE": "drag-and-drop"}
+
+
+def _template(call, path: str) -> dict:
+    data = call("GET", path, revision=TEMPLATE_READ_REVISION).get("data") or {}
+    attrs = data.get("attributes") or {}
+    return {"id": data.get("id"), "name": attrs.get("name"), "html": attrs.get("html") or "",
+            "editor": EDITOR_NAMES.get(attrs.get("editor_type"), attrs.get("editor_type") or "?")}
+
+
+@main.command("flow-set-template")
+@click.argument("flow_id")
+@click.option("--message", "message_num", type=int, required=True, help="Email N, numbered as in flow-detail")
+@click.option("--template", "template_id", required=True, help="The template to put on the email (Klaviyo copies it)")
+@click.option("--dry-run", is_flag=True, help="Show the swap without saving")
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt on a live email")
+@click.pass_context
+def flow_set_template(ctx, flow_id, message_num, template_id, dry_run, yes):
+    """Swap a flow email's template, keeping the email (and its reporting) in place.
+
+    \b
+      klaviyo flow-set-template RDNDw6 --message 2 --template UpRZrn --dry-run
+      klaviyo flow-set-template RDNDw6 --message 2 --template UpRZrn
+
+    Works on any email, including drag-and-drop ones with universal blocks, and
+    on live flows (the next send uses the new template; asks first unless --yes).
+    Klaviyo gives the email its own copy, so later changes to the source
+    template don't reach it: edit the email with edit-template --flow, or run
+    this again with a new template.
+    """
+    try:
+        call = ctx.obj["call"]
+        flow = _load_flow(call, flow_id)
+        action = _message(flow, message_num)
+        if action.get("type") != "send-email":
+            raise click.UsageError(f"Message {message_num} is SMS; only emails have templates.")
+        data = action.get("data") or {}
+        message = dict(data.get("message") or {})
+        old_id = message.get("template_id")
+        if old_id == template_id:
+            raise click.ClickException(f"Email {message_num} already uses template {template_id}; nothing changed.")
+        source = _template(call, f"/api/templates/{template_id}/")
+        try:
+            old = _template(call, f"/api/templates/{old_id}/") if old_id else None
+        except APIError:
+            old = None
+        live = data.get("status") == "live" and _active(flow)
+        label = _label(action, message_num)
+        plan = {"flow_id": flow_id, "action_id": action["id"], "message_id": message.get("id"),
+                "old_template": old_id, "source_template": template_id}
+        if ctx.obj["json"] and dry_run:
+            output({**plan, "dry_run": True}, use_json=True)
+            return
+        if not ctx.obj["json"]:
+            was = f"{old_id} ({old['editor']}, \"{old['name']}\")" if old else (old_id or "none")
+            print(f"{label} in {flow['name']} ({flow['status']}, email {data.get('status')}):")
+            print(f"  now:   template {was}")
+            print(f"  after: a copy of {template_id} ({source['editor']}, \"{source['name']}\")")
+        if dry_run:
+            print("Dry run, nothing saved.")
+            return
+        if live and not yes and not click.confirm("This email is live; the next send uses the new template. Swap it?"):
+            raise click.ClickException("Nothing changed.")
+
+        definition = {k: v for k, v in action.items() if k in ("id", "type", "links", "data")}
+        definition["data"] = {**data, "message": {**message, "template_id": template_id}}
+        call("PATCH", f"/api/flow-actions/{action['id']}/", body={"data": {
+            "type": "flow-action", "id": str(action["id"]), "attributes": {"definition": definition}}})
+
+        saved = (_message(_load_flow(call, flow_id), message_num).get("data") or {}).get("message") or {}
+        new_id = saved.get("template_id")
+        if not new_id or new_id == old_id:
+            raise click.ClickException(f"Klaviyo didn't keep the swap; email {message_num} still uses {old_id}.")
+        if message.get("id") and saved.get("id") != message.get("id"):
+            raise click.ClickException(f"Swapped, but the email's ID changed ({message.get('id')} -> {saved.get('id')}); "
+                                       f"check flow-detail {flow_id}.")
+        copy = _template(call, f"/api/flow-messages/{saved.get('id') or message.get('id')}/template/")
+        if copy["html"] != source["html"]:
+            raise click.ClickException(f"Swapped to template {new_id}, but its HTML doesn't match {template_id}; "
+                                       f"check it with edit-template --flow {flow_id} --email {message_num}.")
+        if ctx.obj["json"]:
+            output({**plan, "new_template": new_id}, use_json=True)
+            return
+        print(f"Swapped and verified: email {message_num} now uses template {new_id} ({copy['editor']}), "
+              f"identical to {template_id}." + (" Live: the next send uses it." if live else ""))
     except (AuthError, APIError) as e:
         raise click.ClickException(str(e))
 

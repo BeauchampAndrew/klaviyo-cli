@@ -295,3 +295,74 @@ def test_set_status_nothing_to_do():
     result, _ = _run([(("GET", "/api/flows/F1/"), _status_flow("live", "live"))],
                      "flow-set-status", "F1", "live", "--all-messages")
     assert result.exit_code != 0 and "already live" in result.output
+
+
+def _tpl(tid, editor="CODE", html="<p>New</p>", name="Source"):
+    return {"data": {"id": tid, "attributes": {"name": name, "editor_type": editor, "html": html}}}
+
+
+def _swap_flow(status="draft", msg_status="draft", template_id="Te1"):
+    f = _flow(status)
+    email = f["data"]["attributes"]["definition"]["actions"][0]
+    email["data"]["status"] = msg_status
+    email["data"]["message"].update({"id": "m1", "template_id": template_id})
+    return f
+
+
+def _swap_routes(status="draft", msg_status="draft", kept="C1", copy_html="<p>New</p>"):
+    return [(("GET", "/api/flows/F1/"), [_swap_flow(status, msg_status), _swap_flow(status, msg_status, kept)]),
+            (("GET", "/api/templates/NEW/"), _tpl("NEW")),
+            (("GET", "/api/templates/Te1/"), _tpl("Te1", "SYSTEM_DRAGGABLE", "<p>Old</p>", "Old one")),
+            (("PATCH", "/api/flow-actions/e1/"), {"data": {}}),
+            (("GET", "/api/flow-messages/m1/template/"), _tpl("C1", html=copy_html))]
+
+
+def test_set_template_swaps_in_place_and_verifies_the_copy():
+    result, calls = _run(_swap_routes(), "flow-set-template", "F1", "--message", "1", "--template", "NEW")
+    assert result.exit_code == 0, result.output
+    msg = _patch(calls)["data"]["message"]
+    assert msg["template_id"] == "NEW"
+    assert msg["id"] == "m1" and msg["subject_line"] == "Subj" and msg["from_email"] == "hi@x.com"
+    assert _patch(calls)["data"]["status"] == "draft"
+    assert "drag-and-drop" in result.output and "HTML" in result.output
+    assert "Swapped and verified" in result.output and "C1" in result.output
+    # template reads use the revision that tolerates broken drag-and-drop definitions
+    assert all(c[3] == "2026-01-15" for c in calls if "/template" in c[1])
+
+
+def test_set_template_live_email_asks_first():
+    result, calls = _run(_swap_routes("live", "live"), "flow-set-template", "F1", "--message", "1",
+                         "--template", "NEW", stdin="n\n")
+    assert result.exit_code != 0 and "Nothing changed" in result.output
+    assert not [c for c in calls if c[0] == "PATCH"]
+    result, calls = _run(_swap_routes("live", "live"), "flow-set-template", "F1", "--message", "1",
+                         "--template", "NEW", "--yes")
+    assert result.exit_code == 0, result.output
+    assert "next send uses it" in result.output
+
+
+def test_set_template_dry_run_saves_nothing():
+    result, calls = _run(_swap_routes(), "flow-set-template", "F1", "--message", "1", "--template", "NEW", "--dry-run")
+    assert result.exit_code == 0, result.output
+    assert "Dry run" in result.output
+    assert not [c for c in calls if c[0] == "PATCH"]
+
+
+def test_set_template_fails_loudly_when_klaviyo_does_not_keep_it():
+    result, _ = _run(_swap_routes(kept="Te1"), "flow-set-template", "F1", "--message", "1", "--template", "NEW")
+    assert result.exit_code != 0 and "didn't keep the swap" in result.output
+
+
+def test_set_template_fails_when_the_copy_differs():
+    result, _ = _run(_swap_routes(copy_html="<p>Other</p>"), "flow-set-template", "F1", "--message", "1",
+                     "--template", "NEW")
+    assert result.exit_code != 0 and "doesn't match" in result.output
+
+
+def test_set_template_refuses_sms_and_same_template():
+    result, _ = _run([(("GET", "/api/flows/F1/"), _sms_flow("x"))],
+                     "flow-set-template", "F1", "--message", "2", "--template", "NEW")
+    assert result.exit_code != 0 and "is SMS" in result.output
+    result, calls = _run(_swap_routes(), "flow-set-template", "F1", "--message", "1", "--template", "Te1")
+    assert result.exit_code != 0 and "already uses" in result.output
+    assert not [c for c in calls if c[0] == "PATCH"]
