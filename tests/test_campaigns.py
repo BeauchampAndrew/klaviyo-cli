@@ -65,6 +65,16 @@ def _message(mid="MSG1", status="draft", send_time=None, variations=None,
     }
 
 
+def _strategy(method="static", datetime="2026-09-20T14:00:00+00:00", **extra):
+    """A campaign as LEGACY_REVISION returns it: send_strategy is only there."""
+    strategy = {"method": method, "datetime": datetime, **extra}
+    return {"data": {"id": "MSG1", "attributes": {"send_time": None, "send_strategy": strategy}}}
+
+
+def _no_strategy():
+    return {"data": {"attributes": {}}}
+
+
 def _audience(included=("SEGA",), excluded=()):
     return {"data": {"type": "campaign-audience", "id": "AUD1", "attributes": {
         "definition": {"included": list(included), "excluded": list(excluded)}}}}
@@ -157,16 +167,32 @@ def test_get_campaign_reads_message_variation_and_audience(mock_build):
             status="scheduled", send_time="2026-09-20T14:00:00+00:00",
             variations=[_variation(subject="Seen on you", preview_text="Now in Black.")])),
         (("GET", "/api/campaign-audiences/AUD1/"), _audience(("SEGA",), ("SEGX",))),
+        (("GET", "/api/campaigns/MSG1/"), _strategy()),
     ])
     mock_build.return_value = ctx_obj
     result = CliRunner().invoke(main, ["get-campaign", "MSG1"])
     assert result.exit_code == 0, result.output
     out = result.output
     for expected in ("Status: Scheduled", "Subject: Seen on you", "Preview: Now in Black.",
-                     "Send Time: 2026-09-20T14:00:00+00:00", "Include: SEGA", "Exclude: SEGX"):
+                     "Send Time: 2026-09-20T14:00:00+00:00", "Include: SEGA", "Exclude: SEGX",
+                     "Send Strategy: all at once"):
         assert expected in out, expected
-    # Scheduled: no need for the legacy planned-date lookup.
-    assert all(c[3] != LEGACY_REVISION for c in calls)
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_get_campaign_shows_gradual_sending(mock_build):
+    """The percentage only exists at LEGACY_REVISION, so it's read there for any status."""
+    ctx_obj, calls = _api([
+        (("GET", "/api/campaign-messages/MSG1/"), _message(
+            status="scheduled", send_time="2026-09-20T14:00:00+00:00")),
+        (("GET", "/api/campaign-audiences/AUD1/"), _audience()),
+        (("GET", "/api/campaigns/MSG1/"), _strategy("throttled", throttle_percentage=25)),
+    ])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["get-campaign", "MSG1"])
+    assert result.exit_code == 0, result.output
+    assert "Send Strategy: gradual, 25% of recipients per hour (about 4 hours)" in result.output
+    assert calls[-1][3] == LEGACY_REVISION
 
 
 @patch("klaviyo_cli.cli.build_context")
@@ -178,6 +204,7 @@ def test_get_campaign_accepts_container_id(mock_build):
         (("GET", "/api/campaign-messages/MSG1/"), _message(status="sent",
                                                            send_time="2026-09-20T14:00:00+00:00")),
         (("GET", "/api/campaign-audiences/AUD1/"), _audience()),
+        (("GET", "/api/campaigns/MSG1/"), _no_strategy()),
     ])
     mock_build.return_value = ctx_obj
     result = CliRunner().invoke(main, ["get-campaign", "CONT1"])
@@ -255,6 +282,7 @@ def test_get_campaign_names_flag_resolves_segment_and_list_names(mock_build):
         (("GET", "/api/lists/LIST1/"), {"data": {"attributes": {"name": "SEED LIST"}}}),
         (("GET", "/api/segments/GONE1/"), APIError("HTTP 404")),
         (("GET", "/api/lists/GONE1/"), APIError("HTTP 404")),
+        (("GET", "/api/campaigns/MSG1/"), _no_strategy()),
     ])
     mock_build.return_value = ctx_obj
     result = CliRunner().invoke(main, ["get-campaign", "MSG1", "--names"])
@@ -306,6 +334,7 @@ def test_patch_campaign_date_uses_legacy_revision_and_reports_planned_time(mock_
     right after setting a date; it must show the planned time."""
     ctx_obj, calls = _api([
         (("GET", "/api/campaign-messages/MSG1/"), _message()),
+        (("GET", "/api/campaigns/MSG1/"), _no_strategy()),
         (("PATCH", "/api/campaigns/MSG1/"), {"data": {"id": "MSG1", "attributes": {
             "send_time": None,
             "send_strategy": {"method": "static", "datetime": "2026-09-20T14:00:00+00:00"}}}}),
@@ -319,6 +348,120 @@ def test_patch_campaign_date_uses_legacy_revision_and_reports_planned_time(mock_
     assert body["data"]["attributes"]["send_strategy"]["datetime"] == "2026-09-20T10:00:00-04:00"
     assert "not set" not in result.output
     assert "2026-09-20T14:00:00+00:00" in result.output
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_patch_campaign_throttle_with_date_sets_gradual_send(mock_build):
+    ctx_obj, calls = _api([
+        (("GET", "/api/campaign-messages/MSG1/"), _message()),
+        (("GET", "/api/campaigns/MSG1/"), _no_strategy()),
+        (("PATCH", "/api/campaigns/MSG1/"), _strategy("throttled", throttle_percentage=25)),
+    ])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["patch-campaign", "MSG1", "--date", "09-20-2026",
+                                       "--time", "10:00 AM EDT", "--throttle", "25"])
+    assert result.exit_code == 0, result.output
+    method, path, body, revision = calls[-1]
+    assert (method, revision) == ("PATCH", LEGACY_REVISION)
+    assert body["data"]["attributes"]["send_strategy"] == {
+        "method": "throttled", "datetime": "2026-09-20T10:00:00-04:00", "throttle_percentage": 25}
+    assert "Sending: gradual, 25% of recipients per hour (about 4 hours)" in result.output
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_patch_campaign_throttle_alone_keeps_the_planned_time(mock_build):
+    ctx_obj, calls = _api([
+        (("GET", "/api/campaign-messages/MSG1/"), _message()),
+        (("GET", "/api/campaigns/MSG1/"), _strategy("static", "2026-12-01T13:00:00+00:00")),
+        (("PATCH", "/api/campaigns/MSG1/"), _strategy("throttled", "2026-12-01T13:00:00+00:00",
+                                                     throttle_percentage=10)),
+    ])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["patch-campaign", "MSG1", "--throttle", "10"])
+    assert result.exit_code == 0, result.output
+    strategy = calls[-1][2]["data"]["attributes"]["send_strategy"]
+    assert strategy == {"method": "throttled", "datetime": "2026-12-01T13:00:00+00:00",
+                        "throttle_percentage": 10}
+    assert "about 10 hours" in result.output
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_patch_campaign_throttle_without_any_planned_time_writes_nothing(mock_build):
+    ctx_obj, calls = _api([
+        (("GET", "/api/campaign-messages/MSG1/"), _message()),
+        (("GET", "/api/campaigns/MSG1/"), _no_strategy()),
+    ])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["patch-campaign", "MSG1", "--throttle", "25",
+                                       "--include", "SEGA"])
+    assert result.exit_code != 0
+    assert "add --date and --time" in result.output
+    assert all(c[0] == "GET" for c in calls)
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_patch_campaign_date_keeps_an_existing_gradual_send(mock_build):
+    """Moving the date must not silently turn a gradual send back into all-at-once."""
+    ctx_obj, calls = _api([
+        (("GET", "/api/campaign-messages/MSG1/"), _message()),
+        (("GET", "/api/campaigns/MSG1/"), _strategy("throttled", throttle_percentage=20)),
+        (("PATCH", "/api/campaigns/MSG1/"), _strategy("throttled", "2026-09-21T14:00:00+00:00",
+                                                     throttle_percentage=20)),
+    ])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["patch-campaign", "MSG1", "--date", "09-21-2026",
+                                       "--time", "10:00 AM EDT"])
+    assert result.exit_code == 0, result.output
+    strategy = calls[-1][2]["data"]["attributes"]["send_strategy"]
+    assert strategy["method"] == "throttled" and strategy["throttle_percentage"] == 20
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_patch_campaign_throttle_off_goes_back_to_all_at_once(mock_build):
+    ctx_obj, calls = _api([
+        (("GET", "/api/campaign-messages/MSG1/"), _message()),
+        (("GET", "/api/campaigns/MSG1/"), _strategy("throttled", throttle_percentage=20)),
+        (("PATCH", "/api/campaigns/MSG1/"), _strategy("static")),
+    ])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["patch-campaign", "MSG1", "--throttle", "off"])
+    assert result.exit_code == 0, result.output
+    strategy = calls[-1][2]["data"]["attributes"]["send_strategy"]
+    assert strategy == {"method": "static", "datetime": "2026-09-20T14:00:00+00:00",
+                        "options": {"is_local": False}}
+    assert "Sending: all at once" in result.output
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_patch_campaign_fails_when_klaviyo_does_not_keep_the_throttle(mock_build):
+    ctx_obj, _ = _api([
+        (("GET", "/api/campaign-messages/MSG1/"), _message()),
+        (("GET", "/api/campaigns/MSG1/"), _strategy("static")),
+        (("PATCH", "/api/campaigns/MSG1/"), _strategy("static")),
+    ])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["patch-campaign", "MSG1", "--throttle", "25"])
+    assert result.exit_code != 0
+    assert "reads back as" in result.output
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_patch_campaign_send_setting_on_a_scheduled_campaign_points_to_reschedule(mock_build):
+    ctx_obj, calls = _api([
+        (("GET", "/api/campaign-messages/MSG1/"), _message(status="scheduled",
+                                                           send_time="2026-12-01T13:00:00+00:00")),
+    ])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["patch-campaign", "MSG1", "--throttle", "25"])
+    assert result.exit_code != 0
+    assert "klaviyo reschedule MSG1" in result.output
+    assert all(c[0] == "GET" for c in calls)
+
+
+def test_patch_campaign_rejects_a_percentage_klaviyo_does_not_offer():
+    result = CliRunner().invoke(main, ["patch-campaign", "MSG1", "--throttle", "30"])
+    assert result.exit_code != 0
+    assert "--throttle" in result.output
 
 
 @patch("klaviyo_cli.cli.build_context")
@@ -634,8 +777,9 @@ def test_reschedule_reverts_sets_time_schedules_and_verifies(mock_build):
         (("GET", "/api/campaign-messages/MSG1/"), [
             _message(status="scheduled", send_time="2027-03-01T15:00:00+00:00"),
             _message(status="scheduled", send_time="2027-03-08T16:30:00+00:00")]),
+        (("GET", "/api/campaigns/MSG1/"), _strategy("static")),
         (("PATCH", "/api/campaign-message-schedule/MSG1/"), {}),
-        (("PATCH", "/api/campaigns/MSG1/"), {}),
+        (("PATCH", "/api/campaigns/MSG1/"), _strategy("static")),
         (("POST", "/api/campaign-send-jobs/"), {}),
     ])
     mock_build.return_value = ctx_obj
@@ -667,8 +811,9 @@ def test_reschedule_says_what_state_it_left_when_scheduling_fails(mock_build):
     ctx_obj, _ = _api([
         (("GET", "/api/campaign-messages/MSG1/"), _message(status="scheduled",
                                                            send_time="2027-03-01T15:00:00+00:00")),
+        (("GET", "/api/campaigns/MSG1/"), _strategy("static")),
         (("PATCH", "/api/campaign-message-schedule/MSG1/"), {}),
-        (("PATCH", "/api/campaigns/MSG1/"), {}),
+        (("PATCH", "/api/campaigns/MSG1/"), _strategy("static")),
         (("POST", "/api/campaign-send-jobs/"), APIError("audience is empty")),
     ])
     mock_build.return_value = ctx_obj
@@ -676,3 +821,57 @@ def test_reschedule_says_what_state_it_left_when_scheduling_fails(mock_build):
     assert result.exit_code != 0
     assert "back in Draft with the new time" in result.output
     assert "klaviyo schedule MSG1" in result.output
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_reschedule_throttle_alone_keeps_the_time_and_verifies_after_scheduling(mock_build):
+    ctx_obj, calls = _api([
+        (("GET", "/api/campaign-messages/MSG1/"), [
+            _message(status="scheduled", send_time="2027-03-01T15:00:00+00:00"),
+            _message(status="scheduled", send_time="2027-03-01T15:00:00+00:00")]),
+        (("GET", "/api/campaigns/MSG1/"), [
+            _strategy("static", "2027-03-01T15:00:00+00:00"),
+            _strategy("throttled", "2027-03-01T15:00:00+00:00", throttle_percentage=25)]),
+        (("PATCH", "/api/campaign-message-schedule/MSG1/"), {}),
+        (("PATCH", "/api/campaigns/MSG1/"), _strategy("throttled", "2027-03-01T15:00:00+00:00",
+                                                     throttle_percentage=25)),
+        (("POST", "/api/campaign-send-jobs/"), {}),
+    ])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["reschedule", "MSG1", "--throttle", "25"])
+    assert result.exit_code == 0, result.output
+    order = [(c[0], c[1]) for c in calls if c[0] != "GET"]
+    assert order == [("PATCH", "/api/campaign-message-schedule/MSG1/"),
+                     ("PATCH", "/api/campaigns/MSG1/"),
+                     ("POST", "/api/campaign-send-jobs/")]
+    patch_body = next(c for c in calls if c[1] == "/api/campaigns/MSG1/")[2]
+    assert patch_body["data"]["attributes"]["send_strategy"] == {
+        "method": "throttled", "datetime": "2027-03-01T15:00:00+00:00", "throttle_percentage": 25}
+    assert calls[-1][3] == LEGACY_REVISION  # read-back after scheduling
+    assert "Was: 2027-03-01T15:00:00+00:00, all at once" in result.output
+    assert "Sending: gradual, 25% of recipients per hour" in result.output
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_reschedule_flags_a_throttle_lost_on_scheduling(mock_build):
+    ctx_obj, _ = _api([
+        (("GET", "/api/campaign-messages/MSG1/"), _message(status="scheduled",
+                                                           send_time="2027-03-01T15:00:00+00:00")),
+        (("GET", "/api/campaigns/MSG1/"), [_strategy("static"), _strategy("static")]),
+        (("PATCH", "/api/campaign-message-schedule/MSG1/"), {}),
+        (("PATCH", "/api/campaigns/MSG1/"), _strategy("throttled", throttle_percentage=25)),
+        (("POST", "/api/campaign-send-jobs/"), {}),
+    ])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["reschedule", "MSG1", "--throttle", "25"])
+    assert result.exit_code != 0
+    assert "reads back as" in result.output
+
+
+@patch("klaviyo_cli.cli.build_context")
+def test_reschedule_needs_a_date_or_a_throttle(mock_build):
+    ctx_obj, calls = _api([])
+    mock_build.return_value = ctx_obj
+    result = CliRunner().invoke(main, ["reschedule", "MSG1"])
+    assert result.exit_code != 0
+    assert calls == []

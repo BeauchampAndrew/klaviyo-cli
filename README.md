@@ -51,7 +51,7 @@ Run `klaviyo COMMAND --help` for full options on any command.
 
 ### Campaigns
 
-Uses API revision `2026-10-15`, where a campaign is a container of messages and the subject, sender and template live on each message's content variation. The ID a campaign shows in the Klaviyo UI (and in reporting) is its **message** ID, so that's the ID every command prints and takes. A container campaign ID also works when the container holds one message. A draft's planned send date has no field at `2026-10-15`, so `patch-campaign --date`, `upload-sms` and `schedule` (and the planned date `get-campaign` shows) use revision `2026-07-15`.
+Uses API revision `2026-10-15`, where a campaign is a container of messages and the subject, sender and template live on each message's content variation. The ID a campaign shows in the Klaviyo UI (and in reporting) is its **message** ID, so that's the ID every command prints and takes. A container campaign ID also works when the container holds one message. A draft's planned send date has no field at `2026-10-15`, so `patch-campaign --date`, `upload-sms` and `schedule` (and the planned date `get-campaign` shows) use revision `2026-07-15`. Gradual sending (`--throttle`) is also only settable there.
 
 | Command | Description |
 |---|---|
@@ -60,13 +60,13 @@ Uses API revision `2026-10-15`, where a campaign is a container of messages and 
 | `get-campaign` | Show details for a specific campaign, incl. subject/preview and planned send time; `--names` resolves audience IDs |
 | `get-creative` | Dump a campaign's creative (subject + text/HTML) via its template |
 | `list-drafts` | List draft email campaigns for a client |
-| `patch-campaign` | Update campaign send time and/or audiences |
+| `patch-campaign` | Update a draft's send time, gradual sending (`--throttle PERCENT`, percent of recipients per hour: 1, 2, 5, 10, 11, 13, 14, 17, 20, 25, 33 or 50; `off` = all at once) and/or audiences; checks what Klaviyo kept |
 | `patch-message` | Change subject, preview text or sender; re-reads the campaign and fails if the change didn't stick or touched another field |
 | `clone-campaign` | Duplicate a campaign into a new draft and print what it inherited (subject, from address, audiences) plus the new campaign and template IDs |
 | `set-campaign-html` | Replace a campaign's HTML from a file and verify the live creative (`--expect`/`--forbid` text checks) |
 | `schedule` | Schedule a campaign for sending |
 | `unschedule` | Take a scheduled campaign back to Draft, keeping its planned send time (never cancels: a cancelled campaign can't be rescheduled or deleted) |
-| `reschedule` | Move a scheduled or draft campaign to a new send time and schedule it; refuses past times and verifies the result |
+| `reschedule` | Move a scheduled or draft campaign to a new send time and/or gradual setting (`--throttle`, keeps the time when no `--date`) and schedule it; refuses past times and verifies the result |
 | `test-send` | Email a test of a campaign, flow email(s) (`--flow ID --email 1,3` or `all`, numbered as in `flow-detail`), or template (`--template`) to up to 5 addresses per batch. `--as-profile` fills merge tags from a real profile. Arrives as "<subject line> Preview" from Klaviyo Preview Mailer; Klaviyo allows 100 a day per account |
 | `campaign-performance` | Show campaign revenue and engagement metrics |
 | `metrics` | Show sent campaigns for a client within a date window |

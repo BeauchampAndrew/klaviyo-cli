@@ -10,6 +10,8 @@ container ID when the container holds a single message.
 One thing has no home in the new model: the planned send date of a draft that
 isn't scheduled yet. Setting it (patch-campaign --date, upload-sms) and sending
 at it (schedule) still go through LEGACY_REVISION, where the same ID works.
+The same goes for gradual sending (send_strategy "throttled"): 2026-10-15
+doesn't accept it, LEGACY_REVISION does.
 """
 
 import re
@@ -30,6 +32,59 @@ LEGACY_REVISION = "2026-07-15"
 TEMPLATE_READ_REVISION = "2026-01-15"
 
 STATUSES = ("draft", "scheduled", "sending", "sent", "cancelled")
+
+# "Send emails gradually" in the UI: the percent of recipients sent each hour.
+# These are the only values Klaviyo accepts (ThrottledSendStrategy enum).
+THROTTLE_PERCENTAGES = (1, 2, 5, 10, 11, 13, 14, 17, 20, 25, 33, 50)
+
+throttle_option = click.option(
+    "--throttle", default=None, metavar="PERCENT|off",
+    type=click.Choice([str(p) for p in THROTTLE_PERCENTAGES] + ["off"]),
+    help="Send gradually: PERCENT of recipients per hour (25 = over about 4 hours). "
+         f"Allowed: {', '.join(map(str, THROTTLE_PERCENTAGES))}. 'off' = all at once. "
+         "Left out, the campaign keeps its current setting.")
+
+
+def _throttle_of(strategy: dict) -> int | None:
+    if (strategy or {}).get("method") == "throttled":
+        return strategy.get("throttle_percentage")
+    return None
+
+
+def _resolve_throttle(flag: str | None, current: dict) -> int | None:
+    """--throttle left out keeps what the campaign has, so changing the date
+    never silently drops a gradual send."""
+    if flag is None:
+        return _throttle_of(current)
+    return None if flag == "off" else int(flag)
+
+
+def _strategy_label(strategy: dict, fallback: str | None = None) -> str:
+    pct = _throttle_of(strategy)
+    if pct:
+        return f"gradual, {pct}% of recipients per hour (about {round(100 / pct)} hours)"
+    method = (strategy or {}).get("method") or fallback
+    return "all at once" if method == "static" else (method or "N/A")
+
+
+def _set_send_strategy(call, message_id: str, when: str, throttle: int | None) -> dict:
+    """Set the planned send time (and gradual sending) at LEGACY_REVISION and
+    check what Klaviyo kept. Returns the campaign resource."""
+    if throttle:
+        strategy = {"method": "throttled", "datetime": when, "throttle_percentage": throttle}
+    else:
+        strategy = {"method": "static", "datetime": when, "options": {"is_local": False}}
+    resp = call("PATCH", f"/api/campaigns/{message_id}/", body={"data": {
+        "type": "campaign", "id": message_id,
+        "attributes": {"send_strategy": strategy},
+    }}, revision=LEGACY_REVISION)
+    data = resp.get("data") or {}
+    got = (data.get("attributes") or {}).get("send_strategy") or {}
+    if got.get("method") != strategy["method"] or _throttle_of(got) != throttle:
+        raise click.ClickException(
+            f"Klaviyo accepted the change but campaign {message_id} reads back as "
+            f"{got or 'no send setting'} (wanted {strategy}). Check it in the Klaviyo UI.")
+    return data
 
 
 def _send_time_label(attrs: dict, unset: str = "not scheduled") -> str:
@@ -157,12 +212,17 @@ def _audience(call, view: dict) -> dict:
             "excluded": definition.get("excluded") or []}
 
 
-def _legacy_send_strategy(call, message_id: str) -> dict:
-    """An unscheduled draft's planned date only exists at LEGACY_REVISION."""
+def _legacy_send_strategy(call, message_id: str, strict: bool = False) -> dict:
+    """An unscheduled draft's planned date and the gradual-send percentage only
+    exist at LEGACY_REVISION. strict: raise instead of returning {} on an API
+    error (anything that writes from this must not mistake a failed read for
+    'no gradual send')."""
     try:
         resp = call("GET", f"/api/campaigns/{message_id}/?fields[campaign]=send_strategy",
                     revision=LEGACY_REVISION)
     except APIError:
+        if strict:
+            raise
         return {}
     return ((resp.get("data") or {}).get("attributes") or {}).get("send_strategy") or {}
 
@@ -267,9 +327,9 @@ def get_campaign(ctx, campaign_id, show_names):
         call = ctx.obj["call"]
         view = _load(call, campaign_id)
         audience = _audience(call, view)
-        strategy = {}
-        if view["status"] == "draft" and not view["send_time"]:
-            strategy = _legacy_send_strategy(call, view["id"])
+        # The planned date of an unscheduled draft and the gradual-send
+        # percentage only exist at LEGACY_REVISION.
+        strategy = _legacy_send_strategy(call, view["id"])
         variation = view["variations"][0] if view["variations"] else {}
         # Subject + preview text let the scheduling workflow catch clone-leftover
         # subject lines (an email whose SL belongs to the cloned-from campaign).
@@ -307,7 +367,7 @@ def get_campaign(ctx, campaign_id, show_names):
         print("  Audiences:")
         print(f"    Include: {', '.join(included) or '(none)'}")
         print(f"    Exclude: {', '.join(excluded) or '(none)'}")
-        print(f"  Send Strategy: {strategy.get('method') or view['send_strategy'] or 'N/A'}")
+        print(f"  Send Strategy: {_strategy_label(strategy, view['send_strategy'])}")
     except (AuthError, APIError) as e:
         raise click.ClickException(str(e))
 
@@ -360,21 +420,45 @@ def search_campaigns(ctx, query):
 @click.option("--time", "time_val", default=None, help="Send time (e.g. '3:00 PM EST')")
 @click.option("--include", "include_ids", default=None, help="Comma-separated list/segment IDs to include")
 @click.option("--exclude", "exclude_ids", default=None, help="Comma-separated list/segment IDs to exclude")
+@throttle_option
 @click.pass_context
-def patch_campaign(ctx, campaign_id, date_val, time_val, include_ids, exclude_ids):
-    """Update campaign send time and/or audiences."""
+def patch_campaign(ctx, campaign_id, date_val, time_val, include_ids, exclude_ids, throttle):
+    """Update a draft campaign's send time, gradual sending and/or audiences.
+
+    --throttle without --date keeps the planned send time.
+    """
     use_json = ctx.obj["json"]
     if date_val and not time_val:
         raise click.UsageError("--date requires --time as well.")
     if time_val and not date_val:
         raise click.UsageError("--time requires --date as well.")
     set_audiences = include_ids is not None or exclude_ids is not None
-    if not date_val and not set_audiences:
-        raise click.UsageError("Provide at least one of: --date/--time, --include, --exclude")
+    set_strategy = bool(date_val or throttle)
+    if not set_strategy and not set_audiences:
+        raise click.UsageError("Provide at least one of: --date/--time, --throttle, --include, --exclude")
     try:
         call = ctx.obj["call"]
         view = _load(call, campaign_id)
         result: dict = {"id": view["id"]}
+
+        # Work out the send setting before writing anything, so a missing date
+        # doesn't leave the audiences changed and the send setting not.
+        if set_strategy:
+            if view["status"] == "scheduled":
+                raise click.ClickException(
+                    f"Campaign {view['id']} is Scheduled. To change its send time or gradual "
+                    f"sending use: klaviyo reschedule {view['id']} "
+                    "[--date MM-DD-YYYY --time 'H:MM AM TZ'] [--throttle N]")
+            if view["status"] != "draft":
+                raise click.ClickException(
+                    f"Campaign {view['id']} is {_status_label(view['status'])}; only a draft's "
+                    "send time and gradual sending can be changed.")
+            current = _legacy_send_strategy(call, view["id"], strict=True)
+            when = _parse_send_time(date_val, time_val) if date_val else current.get("datetime")
+            if not when:
+                raise click.UsageError(
+                    f"Campaign {view['id']} has no planned send time yet; add --date and --time.")
+            pct = _resolve_throttle(throttle, current)
 
         if set_audiences:
             included = [i.strip() for i in (include_ids or "").split(",") if i.strip()]
@@ -387,25 +471,19 @@ def patch_campaign(ctx, campaign_id, date_val, time_val, include_ids, exclude_id
             result["audience"] = resp.get("data")
 
         attrs = {"send_time": view["send_time"]}
-        if date_val:
+        if set_strategy:
             # A draft's planned date has no field at 2026-10-15 (a send_time PATCH
             # on a draft is silently dropped), so set it where it still exists.
-            resp = call("PATCH", f"/api/campaigns/{view['id']}/", body={"data": {
-                "type": "campaign", "id": view["id"],
-                "attributes": {"send_strategy": {
-                    "method": "static",
-                    "datetime": _parse_send_time(date_val, time_val),
-                    "options": {"is_local": False},
-                }},
-            }}, revision=LEGACY_REVISION)
-            attrs = (resp.get("data") or {}).get("attributes") or {}
-            result["campaign"] = resp.get("data")
+            result["campaign"] = _set_send_strategy(call, view["id"], when, pct)
+            attrs = result["campaign"].get("attributes") or {}
 
         if use_json:
             output(result, use_json=True)
         else:
             print(f"Updated campaign: {view['name'] or view['id']}")
             print(f"  Send Time: {_send_time_label(attrs, unset='not set')}")
+            if set_strategy:
+                print(f"  Sending: {_strategy_label(attrs.get('send_strategy') or {})}")
             if set_audiences:
                 print(f"  Include: {include_ids or '(none)'}")
                 print(f"  Exclude: {exclude_ids or '(none)'}")
@@ -488,20 +566,31 @@ def unschedule(ctx, campaign_id):
         raise click.ClickException(str(e))
 
 
+def _in_past(iso: str) -> bool:
+    return datetime.fromisoformat(iso) <= datetime.now(ZoneInfo("UTC"))
+
+
 @main.command("reschedule")
 @click.argument("campaign_id")
-@click.option("--date", "date_val", required=True, help="New send date (MM-DD-YYYY)")
-@click.option("--time", "time_val", required=True, help="New send time (e.g. '3:00 PM EST')")
+@click.option("--date", "date_val", default=None, help="New send date (MM-DD-YYYY)")
+@click.option("--time", "time_val", default=None, help="New send time (e.g. '3:00 PM EST')")
+@throttle_option
 @click.pass_context
-def reschedule(ctx, campaign_id, date_val, time_val):
-    """Move a scheduled (or draft) campaign to a new send time and schedule it.
+def reschedule(ctx, campaign_id, date_val, time_val, throttle):
+    """Move a scheduled (or draft) campaign to a new send time and/or gradual
+    setting, and schedule it.
 
-    Klaviyo can't move a scheduled send directly: this takes it back to Draft,
-    sets the new time, schedules it again, and checks the result.
+    Klaviyo can't change a scheduled send directly: this takes it back to Draft,
+    sets the new time, schedules it again, and checks the result. --throttle
+    without --date keeps the current send time.
     """
     use_json = ctx.obj["json"]
-    new_time = _parse_send_time(date_val, time_val)
-    if datetime.fromisoformat(new_time) <= datetime.now(ZoneInfo("UTC")):
+    if bool(date_val) != bool(time_val):
+        raise click.UsageError("--date and --time go together.")
+    if not date_val and not throttle:
+        raise click.UsageError("Provide --date and --time, --throttle, or both.")
+    new_time = _parse_send_time(date_val, time_val) if date_val else None
+    if new_time and _in_past(new_time):
         raise click.UsageError(f"{new_time} is in the past; scheduling it would send right away.")
     try:
         call = ctx.obj["call"]
@@ -511,13 +600,27 @@ def reschedule(ctx, campaign_id, date_val, time_val):
                 f"Campaign {view['id']} is {_status_label(view['status'])}; only Scheduled or "
                 "Draft campaigns can be rescheduled.")
         old_time = view["send_time"]
+        current = _legacy_send_strategy(call, view["id"], strict=True)
+        when = new_time or old_time or current.get("datetime")
+        if not when:
+            raise click.UsageError(
+                f"Campaign {view['id']} has no send time yet; add --date and --time.")
+        if _in_past(when):
+            raise click.UsageError(
+                f"Its send time {when} is in the past; scheduling it would send right away. "
+                "Add --date and --time.")
+        pct = _resolve_throttle(throttle, current)
         if view["status"] == "scheduled":
             _revert_to_draft(call, view["id"])
-        call("PATCH", f"/api/campaigns/{view['id']}/", body={"data": {
-            "type": "campaign", "id": view["id"],
-            "attributes": {"send_strategy": {"method": "static", "datetime": new_time,
-                                             "options": {"is_local": False}}},
-        }}, revision=LEGACY_REVISION)
+        try:
+            _set_send_strategy(call, view["id"], when, pct)
+        except (APIError, click.ClickException) as e:
+            if view["status"] != "scheduled":
+                raise
+            raise click.ClickException(
+                f"Campaign {view['id']} is back in Draft (was scheduled for {old_time}), but "
+                f"setting the new send time failed: {getattr(e, 'message', e)}. "
+                f"Fix that, then run: klaviyo reschedule {view['id']} ...")
         try:
             call("POST", "/api/campaign-send-jobs/",
                  body={"data": {"type": "campaign-send-job", "id": view["id"]}},
@@ -531,13 +634,22 @@ def reschedule(ctx, campaign_id, date_val, time_val):
             raise click.ClickException(
                 f"Campaign {view['id']} is {_status_label(after['status'])} after rescheduling. "
                 "Check it in the Klaviyo UI.")
+        final = _legacy_send_strategy(call, view["id"], strict=True)
+        if _throttle_of(final) != pct:
+            wanted = _strategy_label({"method": "throttled", "throttle_percentage": pct} if pct
+                                     else {"method": "static"})
+            raise click.ClickException(
+                f"Campaign {view['id']} is scheduled for {after['send_time']}, but its send "
+                f"setting reads back as {final or 'nothing'} (wanted {wanted}). "
+                "Check it in the Klaviyo UI.")
         if use_json:
             output({"id": view["id"], "status": "Scheduled", "old_send_time": old_time,
-                    "send_time": after["send_time"]}, use_json=True)
+                    "send_time": after["send_time"], "throttle_percentage": pct}, use_json=True)
         else:
             print(f"Rescheduled {view['name'] or view['id']} (verified).")
-            print(f"  Was: {old_time or 'not scheduled'}")
+            print(f"  Was: {old_time or 'not scheduled'}, {_strategy_label(current, 'unknown')}")
             print(f"  Now: {after['send_time']}")
+            print(f"  Sending: {_strategy_label(final)}")
     except (AuthError, APIError) as e:
         raise click.ClickException(str(e))
 
